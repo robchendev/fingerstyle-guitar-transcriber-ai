@@ -17,7 +17,10 @@ from torch.utils.data import Dataset, Sampler
 from .canonical_events import fraction
 from .dataset_io import ROOT, sha256
 from .dataset_release import release_path, validate_release
-from .transcriber_audio import HarnessError, audio_features, conditioning_features, read_audio_window
+from .transcriber_audio import (
+    BASE_CONDITIONING_DIM, DOWNBEAT_CONDITIONING_DIM, HarnessError,
+    audio_features, conditioning_features, read_audio_window,
+)
 
 
 PAIRED_TECHNIQUE_TARGET_POLICY = "native-positive-only-rasgueado-v1"
@@ -102,7 +105,7 @@ def collate_windows(items):
     return batch
 
 
-def training_conditioning(record, clip_times):
+def training_conditioning(record, clip_times, conditioning_dim=BASE_CONDITIONING_DIM):
     data, candidate = record["data"], record["candidate"]
     mapping = candidate["denseMapping"]
     audio = np.array([point["clipSeconds"] for point in mapping])
@@ -122,7 +125,23 @@ def training_conditioning(record, clip_times):
     meters = [{"position": 0., "timeSignature": timing["timeSignature"]}]
     meters.extend({"position": starts[event["measureIndex"]], "timeSignature": event["timeSignature"]} for event in timing["sourceTimeSignatureChanges"])
     instrument = data.labels["conditioning"]["instrument"]
-    return conditioning_features(instrument["openStringMidi"], instrument["capoFret"], tempos, meters, positions)
+    kwargs = {}
+    if conditioning_dim == DOWNBEAT_CONDITIONING_DIM:
+        downbeat = record.get("downbeatConditioning")
+        if not isinstance(downbeat, dict):
+            raise HarnessError("New training requires reviewed first-full-bar downbeat conditioning.")
+        quarter = downbeat["scoreQuarter"]
+        kwargs = {
+            "first_full_bar_downbeat": downbeat["clipSeconds"],
+            "score_quarters": positions,
+            "first_full_bar_quarter": quarter[0] / quarter[1],
+        }
+    elif conditioning_dim != BASE_CONDITIONING_DIM:
+        raise HarnessError("Unsupported conditioning dimension.")
+    return conditioning_features(
+        instrument["openStringMidi"], instrument["capoFret"], tempos, meters,
+        positions, **kwargs,
+    )
 
 
 def encode_targets(window, canonical, frame_times, model_config, *, negative_onsets_allowed,
@@ -400,7 +419,9 @@ class TrainingDataset(Dataset):
         record, window = self.windows[index]
         features, times = self._features(record, window)
         clip_times = times + window["startSample"] / record["row"]["sampleRate"]
-        conditioning = training_conditioning(record, clip_times)
+        conditioning = training_conditioning(
+            record, clip_times, self.model_config.conditioning_dim,
+        )
         local_window = window
         if self.model_config.architecture_version >= 2:
             from .technique_supervision import techniques_in_window
@@ -452,7 +473,10 @@ class TrainingDataset(Dataset):
             raise HarnessError("The release manifest must be inside its declared private data root.")
         if split not in ("train", "validation"):
             raise HarnessError("Training releases contain train and validation splits only.")
-        if feature_config.n_mels != model_config.n_mels or model_config.conditioning_dim != 12:
+        if (
+            feature_config.n_mels != model_config.n_mels
+            or model_config.conditioning_dim not in (BASE_CONDITIONING_DIM, DOWNBEAT_CONDITIONING_DIM)
+        ):
             raise HarnessError("Feature/model dimensions disagree.")
         self.feature_config, self.model_config = feature_config, model_config
         manifest, records, bindings = validate_release(self.manifest_path)
@@ -484,6 +508,10 @@ class TrainingDataset(Dataset):
                 "percussionAnnotationsComplete": payload["approval"].get("percussionAnnotationsComplete") is True,
                 "voiceSupervisionPolicy": payload["approval"].get("voiceSupervisionPolicy", "native-multivoice"),
             }
+            if "downbeatConditioning" in payload:
+                record["downbeatConditioning"] = payload["downbeatConditioning"]
+            elif model_config.conditioning_dim == DOWNBEAT_CONDITIONING_DIM:
+                raise HarnessError("The release predates required first-full-bar downbeat conditioning; rebuild it.")
             if model_config.architecture_version >= 2:
                 from .score_alignment import ScoreClock
                 from .technique_supervision import projected_techniques

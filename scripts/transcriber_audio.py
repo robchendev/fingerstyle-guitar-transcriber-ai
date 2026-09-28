@@ -16,6 +16,10 @@ class HarnessError(ValueError):
     """The harness cannot safely use the supplied input or configuration."""
 
 
+BASE_CONDITIONING_DIM = 12
+DOWNBEAT_CONDITIONING_DIM = 16
+
+
 @dataclass(frozen=True)
 class FeatureConfig:
     sample_rate: int = 22050
@@ -94,7 +98,64 @@ def audio_features(samples, sample_rate, config=FeatureConfig()):
     return features, times
 
 
-def conditioning_features(tuning, capo, tempo_events, meter_events, positions):
+def _quarter_positions(tempo_events, positions):
+    positions = np.asarray(positions, dtype=np.float64)
+    event_positions = np.array([event["position"] for event in tempo_events], dtype=np.float64)
+    quarter_bpms = np.array([
+        float(validate_provided_timing(event, [4, 4]))
+        for event in tempo_events
+    ])
+    cumulative = np.zeros(len(tempo_events), dtype=np.float64)
+    for index in range(1, len(tempo_events)):
+        duration = event_positions[index] - event_positions[index - 1]
+        previous = quarter_bpms[index - 1]
+        following = quarter_bpms[index] if tempo_events[index - 1].get("linear", False) else previous
+        cumulative[index] = cumulative[index - 1] + duration * (previous + following) / 120
+    indices = np.searchsorted(event_positions, positions, side="right") - 1
+    elapsed = positions - event_positions[indices]
+    bpm = quarter_bpms[indices]
+    slopes = np.zeros(len(tempo_events), dtype=np.float64)
+    for index, event in enumerate(tempo_events[:-1]):
+        if event.get("linear", False):
+            slopes[index] = (quarter_bpms[index + 1] - quarter_bpms[index]) / (
+                event_positions[index + 1] - event_positions[index]
+            )
+    return cumulative[indices] + (bpm * elapsed + .5 * slopes[indices] * elapsed ** 2) / 60
+
+
+def _phase_features(
+    meter_events, positions, quarter_positions, meter_quarters,
+    first_downbeat_position, first_downbeat_quarter,
+):
+    meter_positions = np.array([event["position"] for event in meter_events], dtype=np.float64)
+    meter_indices = np.searchsorted(meter_positions, positions, side="right") - 1
+    anchors = np.where(
+        meter_quarters[meter_indices] > first_downbeat_quarter,
+        meter_quarters[meter_indices],
+        first_downbeat_quarter,
+    )
+    relative = quarter_positions - anchors
+    beat_lengths = np.empty(len(positions), dtype=np.float64)
+    bar_lengths = np.empty(len(positions), dtype=np.float64)
+    for index, meter_index in enumerate(meter_indices):
+        numerator, denominator = meter_events[int(meter_index)]["timeSignature"]
+        beat_lengths[index] = 4 / denominator
+        bar_lengths[index] = numerator * beat_lengths[index]
+    phases = np.column_stack((
+        np.sin(2 * np.pi * relative / beat_lengths),
+        np.cos(2 * np.pi * relative / beat_lengths),
+        np.sin(2 * np.pi * relative / bar_lengths),
+        np.cos(2 * np.pi * relative / bar_lengths),
+    ))
+    if not np.isfinite(first_downbeat_position) or first_downbeat_position < 0 or not np.isfinite(phases).all():
+        raise HarnessError("First full-bar downbeat must be a finite nonnegative timestamp.")
+    return phases.astype(np.float32)
+
+
+def conditioning_features(
+    tuning, capo, tempo_events, meter_events, positions, *,
+    first_full_bar_downbeat=None, score_quarters=None, first_full_bar_quarter=None,
+):
     positions = np.asarray(positions, dtype=np.float64)
     if positions.ndim != 1 or not len(positions) or not np.isfinite(positions).all() or np.any(np.diff(positions) < 0):
         raise HarnessError("Conditioning positions must be finite and nondecreasing.")
@@ -123,7 +184,46 @@ def conditioning_features(tuning, capo, tempo_events, meter_events, positions):
             mask = ti == index
             ratio = (positions[mask] - tempo_positions[index]) / (tempo_positions[index + 1] - tempo_positions[index])
             quarter_bpm[mask] = bpm[index] + ratio * (bpm[index + 1] - bpm[index])
-    values = np.empty((len(positions), 12), dtype=np.float32)
+    include_phase = first_full_bar_downbeat is not None
+    if include_phase:
+        if (
+            type(first_full_bar_downbeat) not in (int, float)
+            or not math.isfinite(first_full_bar_downbeat)
+            or first_full_bar_downbeat < 0
+        ):
+            raise HarnessError("First full-bar downbeat must be a finite nonnegative timestamp.")
+        first_full_bar_downbeat = float(first_full_bar_downbeat)
+        if score_quarters is None:
+            phase_quarters = _quarter_positions(tempo_events, positions)
+            anchor_quarter = float(_quarter_positions(tempo_events, [first_full_bar_downbeat])[0])
+            meter_quarters = _quarter_positions(
+                tempo_events, [event["position"] for event in meter_events],
+            )
+        else:
+            phase_quarters = np.asarray(score_quarters, dtype=np.float64)
+            if (
+                phase_quarters.shape != positions.shape
+                or not np.isfinite(phase_quarters).all()
+                or np.any(np.diff(phase_quarters) < 0)
+                or type(first_full_bar_quarter) not in (int, float)
+                or not math.isfinite(first_full_bar_quarter)
+                or first_full_bar_quarter < 0
+            ):
+                raise HarnessError("Aligned score quarters and first full-bar score position are required.")
+            anchor_quarter = float(first_full_bar_quarter)
+            meter_quarters = np.array(
+                [event["position"] for event in meter_events], dtype=np.float64,
+            )
+        phase = _phase_features(
+            meter_events, positions, phase_quarters, meter_quarters,
+            first_full_bar_downbeat, anchor_quarter,
+        )
+    elif score_quarters is not None or first_full_bar_quarter is not None:
+        raise HarnessError("Score phase inputs require a first full-bar downbeat timestamp.")
+    values = np.empty(
+        (len(positions), DOWNBEAT_CONDITIONING_DIM if include_phase else BASE_CONDITIONING_DIM),
+        dtype=np.float32,
+    )
     values[:, :6] = (np.array(tuning) - 60) / 24
     values[:, 6] = capo / 12
     values[:, 7] = np.log2(quarter_bpm / 120)
@@ -131,4 +231,6 @@ def conditioning_features(tuning, capo, tempo_events, meter_events, positions):
         unit = tempo_events[int(tempo_index)]["beatUnit"]
         meter = meter_events[int(meter_index)]["timeSignature"]
         values[index, 8:12] = unit[0] / 8, unit[1] / 16, meter[0] / 12, meter[1] / 16
+    if include_phase:
+        values[:, BASE_CONDITIONING_DIM:] = phase
     return torch.from_numpy(values)

@@ -101,7 +101,8 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(ModelConfig(**json.loads(json.dumps(asdict(config)))), config)
         with self.assertRaises(FrozenInstanceError):
             config.max_fret = 10
-        for options in ({"architecture_version": 0}, {"architecture_version": 5}, {"n_mels": 0}, {"conditioning_dim": 11}, {"hidden_size": 0},
+        self.assertEqual(ModelConfig(conditioning_dim=16).conditioning_dim, 16)
+        for options in ({"architecture_version": 0}, {"architecture_version": 5}, {"n_mels": 0}, {"conditioning_dim": 11}, {"conditioning_dim": 13}, {"hidden_size": 0},
                         {"recurrent_layers": -1}, {"max_fret": -1}, {"max_fret": 128},
                         {"max_voices": 0}, {"dropout": 1}, {"dropout": -1}, {"dropout": float("nan")}):
             with self.subTest(options=options), self.assertRaises(ValueError):

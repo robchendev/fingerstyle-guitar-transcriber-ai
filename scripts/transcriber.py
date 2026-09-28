@@ -18,7 +18,10 @@ import torch
 from torch.utils.data import DataLoader
 
 from .dataset_io import ROOT, publish_json, read_json, sha256
-from .transcriber_audio import FeatureConfig, HarnessError, audio_features, conditioning_features, read_audio_window
+from .transcriber_audio import (
+    DOWNBEAT_CONDITIONING_DIM, FeatureConfig, HarnessError, audio_features,
+    conditioning_features, read_audio_window,
+)
 from .transcriber_data import PAIRED_TECHNIQUE_TARGET_POLICY, EpochShuffleSampler, TrainingDataset, collate_windows
 
 
@@ -36,7 +39,7 @@ def default_config():
     from .transcriber_model import ModelConfig
     from .transcriber_runtime import TrainingConfig
     return {
-        "schemaVersion": 1, "features": asdict(FeatureConfig()), "model": asdict(ModelConfig(architecture_version=4)),
+        "schemaVersion": 1, "features": asdict(FeatureConfig()), "model": asdict(ModelConfig(architecture_version=4, conditioning_dim=DOWNBEAT_CONDITIONING_DIM)),
         "training": asdict(TrainingConfig()),
         "data": {"manifest": "data\\releases\\dataset-v1\\manifest.json", "batch_size": 4, "num_workers": 0, "num_threads": max(1, min(32, (os.cpu_count() or 1) * 3 // 4)), "cache": "cache\\transcriber"},
     }
@@ -63,8 +66,8 @@ def load_config(path=None):
             raise HarnessError(f"Invalid data-loader {key}.")
     if not isinstance(data["manifest"], str) or not isinstance(data["cache"], str):
         raise HarnessError("Manifest and cache paths must be explicit strings.")
-    if instances[0].n_mels != instances[1].n_mels or instances[1].conditioning_dim != 12:
-        raise HarnessError("Feature and model dimensions disagree.")
+    if instances[0].n_mels != instances[1].n_mels or instances[1].conditioning_dim != DOWNBEAT_CONDITIONING_DIM:
+        raise HarnessError("New training requires 16-dimensional downbeat-conditioned inputs.")
     if "video" in config:
         video = config["video"]
         if not isinstance(video, dict) or set(video) != {"index", "model"} or not isinstance(video["index"], str) or not video["index"].strip() or not isinstance(video["model"], dict):
@@ -597,10 +600,17 @@ def evaluate_decoded_events(args):
     return report
 
 
-def inference_metadata(value):
+def inference_metadata(value, conditioning_dim=DOWNBEAT_CONDITIONING_DIM):
     required = {"openStringMidi", "capoFret", "tempo", "timeSignature"}
-    if not isinstance(value, dict) or not required <= set(value) or set(value) - required - {"tempoChanges", "timeSignatureChanges"}:
-        raise HarnessError("Inference metadata requires tuning, full capo, BPM/beat unit and meter; only explicit time-based schedules are optional.")
+    if conditioning_dim == DOWNBEAT_CONDITIONING_DIM:
+        required.add("firstFullBarDownbeatSeconds")
+    optional = {"tempoChanges", "timeSignatureChanges", "firstFullBarDownbeatSeconds"}
+    if not isinstance(value, dict) or not required <= set(value) or set(value) - required - optional:
+        downbeat_requirement = " and firstFullBarDownbeatSeconds" if conditioning_dim == DOWNBEAT_CONDITIONING_DIM else ""
+        raise HarnessError(
+            "Inference metadata requires tuning, full capo, BPM/beat unit, meter"
+            f"{downbeat_requirement}; only explicit time-based schedules are optional."
+        )
     if not isinstance(value["tempo"], dict) or not {"bpm", "beatUnit"} <= set(value["tempo"]) or set(value["tempo"]) - {"bpm", "beatUnit", "linear"}:
         raise HarnessError("Initial tempo requires explicit BPM and beat unit.")
     tempo = [{"position": 0., **value["tempo"]}]
@@ -617,7 +627,13 @@ def inference_metadata(value):
         if not isinstance(event, dict) or set(event) != {"timeSeconds", "timeSignature"}:
             raise HarnessError("A meter change requires timeSeconds and timeSignature.")
         meters.append({"position": event["timeSeconds"], "timeSignature": event["timeSignature"]})
-    conditioning_features(value["openStringMidi"], value["capoFret"], tempo, meters, [0.])
+    downbeat = value.get("firstFullBarDownbeatSeconds")
+    conditioning = conditioning_features(
+        value["openStringMidi"], value["capoFret"], tempo, meters, [0.],
+        first_full_bar_downbeat=downbeat if conditioning_dim == DOWNBEAT_CONDITIONING_DIM else None,
+    )
+    if conditioning.shape[1] != conditioning_dim:
+        raise HarnessError("Inference metadata conditioning differs from the checkpoint contract.")
     return tempo, meters
 
 
@@ -629,7 +645,8 @@ def infer(args):
     identity = checkpoint_identity(checkpoint)
     torch.set_num_threads(4)
     metadata = read_json(Path(args.metadata))
-    tempos, meters = inference_metadata(metadata)
+    conditioning_dim = identity["model"]["conditioning_dim"]
+    tempos, meters = inference_metadata(metadata, conditioning_dim)
     config = FeatureConfig(**identity["features"])
     audio_path = Path(args.audio).resolve()
     if audio_path.suffix.lower() not in (".mp3", ".flac", ".wav"):
@@ -660,7 +677,10 @@ def infer(args):
             peak = max(peak, float(np.max(np.abs(samples))))
             features, local_times = audio_features(samples, rate, config)
             times = local_times + start_sample / rate
-            conditioning = conditioning_features(metadata["openStringMidi"], metadata["capoFret"], tempos, meters, times)
+            conditioning = conditioning_features(
+                metadata["openStringMidi"], metadata["capoFret"], tempos, meters, times,
+                first_full_bar_downbeat=metadata.get("firstFullBarDownbeatSeconds") if conditioning_dim == DOWNBEAT_CONDITIONING_DIM else None,
+            )
             if video_bundle is not None:
                 video = {name: value.unsqueeze(0).to(device) for name, value in video_bundle.window(times).items()}
                 outputs = model(features[None].to(device), conditioning[None].to(device), torch.tensor([len(features)], dtype=torch.long), video=video)

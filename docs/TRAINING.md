@@ -6,6 +6,25 @@ Use matching `.gp` scores and already-trimmed local performance videos. Audio is
 
 **Important: Every video must start exactly on the first beat of the song at timestamp 0.** Trim any lead-in, silence or count-in before preparing the dataset. Keep the audio and video synchronized, including any separately supplied audio.
 
+Released training targets record the first full-bar downbeat separately. For a
+pickup, it is derived from the normalized GP pickup measure and reviewed
+score-to-audio alignment; otherwise it is the first measure downbeat. New joint
+training conditions each frame on cyclic beat and bar phase from this anchor.
+
+### Correct filmed tuning and capo before release
+
+The source GP must describe the tuning and physical full-capo fret visible in
+the performance. Do not preserve a convenience normalization such as replacing
+half-step-down/capo-2 with standard/capo-1. These settings have the same
+sounding pitch at a given fret, but they do not have the same physical
+fretboard position and therefore conflict with video supervision.
+
+For the Eddie corpus, use the
+[tuning/capo correction handoff](CAPO_NORMALIZATION_HANDOFF.md). Apply reviewed
+corrections to each owned `raw.gp`, invalidate its existing preparation, repeat
+score/alignment review and publish a new immutable release. Never edit frozen
+release payloads or generated `normalized.gp` files in place.
+
 ## Prepare and review
 
 Save this example as `runs\batch.json` and replace its file paths and plucking-hand screen sides. Paths can be absolute or relative to the repository. Set aside separate groups for validation, which evaluates the model during training. Keep related arrangements and copies of the same recording in the same group and split.
@@ -104,10 +123,10 @@ same dataset:
 .\scripts\video-evidence\.venv\Scripts\python.exe -m scripts.fretboard_annotation serve --dataset data\fretboard-keypoints
 ```
 
-Use the mouse wheel to zoom, middle/right drag to pan, keys `1` through `6` to
+Use the mouse wheel to zoom, middle/right drag to pan, keys `1` through `7` to
 select a point, `Q`/`W`/`E` for available/occluded/unavailable status, and
 Enter to complete and advance. `Complete` means the frame was fully reviewed,
-not that all six landmarks are visible.
+not that all seven landmarks are visible.
 
 Export completed annotations to YOLO pose labels and `data.yaml`:
 
@@ -118,6 +137,29 @@ Export completed annotations to YOLO pose labels and `data.yaml`:
 Images retain their native resolution and labels use normalized coordinates.
 The eventual training `imgsz` is a separate model-training choice; native 4K
 sources may be trained at 4K or downscaled without relabeling.
+
+### Reading fretboard-detector training output
+
+Ultralytics reports five training losses; lower is better for each:
+
+- `box_loss`: fretboard bounding-box localization (`box` is shorthand).
+- `pose_loss`: the seven keypoint coordinate error (`pose` is shorthand for
+  the keypoint arrangement).
+- `kobj_loss`: keypoint objectness, meaning whether each keypoint is present.
+- `cls_loss`: fretboard class/classification confidence (`cls` is shorthand).
+- `dfl_loss`: Distribution Focal Loss, which refines the probability
+  distributions used for bounding-box edges.
+
+The terms solve different subproblems and need not improve together. Large
+early classification drops, short plateaus and later box/pose improvement are
+normal. Judge trends over multiple epochs, not one batch or three epochs.
+
+After an epoch, the validation table reports box and pose precision (`P`),
+recall (`R`), `mAP50` and `mAP50-95`; higher is better. Pose `mAP50-95` is the
+main summary for the seven landmarks. The run directory also contains
+`results.csv` and `results.png` with training and validation losses. Improving
+training loss with persistently declining validation mAP indicates
+overfitting.
 
 Alternatively, `python -m scripts.prepare_training_data batch-train --manifest runs\batch.json --output-directory runs\video-evidence\batches\dataset-v1 --epochs 20 --device cpu --cpu-threads 4` prepares data and trains the audio/video model, pausing when review is needed. Rerunning the same command resumes training or reuses a completed result.
 

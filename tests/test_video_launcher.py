@@ -34,6 +34,7 @@ class VideoLauncherTests(unittest.TestCase):
             "--output-directory", str(self.output), "--settings", str(self.settings),
             "--tuning", "D2", "G2", "D3", "F#3", "A3", "D4", "--capo", "0",
             "--bpm", "70", "--beat-unit", "1/4", "--time-signature", "4/4",
+            "--first-full-bar-downbeat", "1.25",
         ]
         self.stdout = self.enterContext(patch("sys.stdout", new=StringIO()))
         self.stderr = self.enterContext(patch("sys.stderr", new=StringIO()))
@@ -58,6 +59,7 @@ class VideoLauncherTests(unittest.TestCase):
         self.assertEqual(metadata["capoFret"], 0)
         self.assertEqual(metadata["tempo"], {"bpm": 70, "beatUnit": [1, 4]})
         self.assertEqual(metadata["timeSignature"], [4, 4])
+        self.assertEqual(metadata["firstFullBarDownbeatSeconds"], 1.25)
         self.assertFalse(self.video.with_suffix(".metadata.json").exists())
         self.assertFalse(Path(args.metadata).is_relative_to(self.output))
         self.assertIn("Transcription complete: both GP files saved.", self.stdout.getvalue())
@@ -131,14 +133,14 @@ class VideoLauncherTests(unittest.TestCase):
         self.assertFalse((self.root / "runs" / "transcription-metadata").exists())
 
     def test_required_musical_fields_and_invalid_syntax_fail_without_files(self):
-        for name, count in (("--tuning", 6), ("--capo", 1), ("--bpm", 1), ("--beat-unit", 1), ("--time-signature", 1)):
+        for name, count in (("--tuning", 6), ("--capo", 1), ("--bpm", 1), ("--beat-unit", 1), ("--time-signature", 1), ("--first-full-bar-downbeat", 1)):
             args = list(self.args)
             index = args.index(name)
             del args[index:index + count + 1]
             with self.subTest(missing=name), self.assertRaises(SystemExit) as error:
                 launcher.main(args)
             self.assertEqual(error.exception.code, 2)
-        for extra in (["--note-cutoff", "nan"], ["--x-cutoff", "1.1"], ["--beat-unit", "1/0"],
+        for extra in (["--note-cutoff", "nan"], ["--x-cutoff", "1.1"], ["--beat-unit", "1/0"], ["--first-full-bar-downbeat", "-1"],
                       ["--tuning", "D", "G2", "D3", "F#3", "A3", "D4"]):
             with self.subTest(extra=extra), self.assertRaises(SystemExit) as error:
                 launcher.main([*self.args, *extra])

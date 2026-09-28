@@ -115,8 +115,16 @@ class TargetEncodingTests(unittest.TestCase):
         record = {
             "data": SimpleNamespace(labels=labels, normalization=normalization),
             "candidate": {"denseMapping": [{"clipSeconds": .35000000000000003, "scoreQuarter": 0.}, {"clipSeconds": 6., "scoreQuarter": 6.}]},
+            "downbeatConditioning": {
+                "pickupPresent": False, "scoreQuarter": [0, 1],
+                "clipSeconds": .35000000000000003,
+                "source": "normalized-gp-pickup-and-reviewed-score-audio-alignment",
+            },
         }
         self.assertEqual(training_conditioning(record, np.array([.35, .37])).shape, (2, 12))
+        downbeat = training_conditioning(record, np.array([.35, .37]), 16)
+        self.assertEqual(downbeat.shape, (2, 16))
+        torch.testing.assert_close(downbeat[0, 12:], torch.tensor([0., 1., 0., 1.]), atol=1e-5, rtol=0)
         with self.assertRaisesRegex(HarnessError, "outside"):
             training_conditioning(record, np.array([.35 - 1 / 48000, .37]))
 

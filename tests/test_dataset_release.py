@@ -66,6 +66,10 @@ def synthetic_release(root, *, plateau=False, percussion_complete=None, unresolv
         payload = {
             "schemaVersion": 1, "kind": "local-training-targets", "id": identifier,
             "canonical": labels, "normalization": normalization, "candidate": candidate, "approval": approval,
+            "downbeatConditioning": {
+                "pickupPresent": False, "scoreQuarter": [0, 1], "clipSeconds": 0.,
+                "source": "normalized-gp-pickup-and-reviewed-score-audio-alignment",
+            },
             "windows": [{"windowId": f"{identifier}:0-{rate * 6}", "startSample": 0, "stopSampleExclusive": rate * 6, "targets": targets_in_window(notes, gestures, 0, rate * 6, rate, percussion_coverage=coverage)}],
         }
         entries.append({

@@ -51,12 +51,39 @@ class TranscriberAudioTests(unittest.TestCase):
         shifted = conditioning_features([40, 45, 50, 55, 59, 64], 2, tempos, meters, [.5, 1.5, 2.5, 3.5])
         torch.testing.assert_close(features, shifted)
 
+    def test_reviewed_downbeat_adds_cyclic_beat_and_bar_phase(self):
+        tempo = [{"position": 0, "bpm": 60, "beatUnit": [1, 4]}]
+        meter = [{"position": 0, "timeSignature": [4, 4]}]
+        values = conditioning_features(
+            [40, 45, 50, 55, 59, 64], 0, tempo, meter, [0, .5, 1, 2],
+            first_full_bar_downbeat=1,
+        )
+        self.assertEqual(values.shape, (4, 16))
+        torch.testing.assert_close(values[2, 12:], torch.tensor([0., 1., 0., 1.]), atol=1e-6, rtol=0)
+        torch.testing.assert_close(values[0, 12:], torch.tensor([0., 1., -1., 0.]), atol=1e-6, rtol=0)
+        aligned = conditioning_features(
+            [40, 45, 50, 55, 59, 64], 0, tempo, meter, [0, .5, 1, 2],
+            first_full_bar_downbeat=3.25,
+            score_quarters=[0, .5, 1, 2],
+            first_full_bar_quarter=1,
+        )
+        torch.testing.assert_close(values[:, 12:], aligned[:, 12:], atol=1e-6, rtol=0)
+
     def test_nominal_ramps_and_invalid_inputs_are_explicit(self):
         tempo = [{"position": 0, "bpm": 60, "beatUnit": [1, 4], "linear": True}, {"position": 4, "bpm": 120, "beatUnit": [1, 4]}]
         values = conditioning_features([40, 45, 50, 55, 59, 64], 0, tempo, [{"position": 0, "timeSignature": [4, 4]}], [0, 2, 4])
         self.assertAlmostEqual(float(values[1, 7]), np.log2(.75), places=6)
+        phased = conditioning_features(
+            [40, 45, 50, 55, 59, 64], 0, tempo,
+            [{"position": 0, "timeSignature": [4, 4]}, {"position": 4, "timeSignature": [3, 4]}],
+            [0, 2, 4], first_full_bar_downbeat=0,
+        )
+        torch.testing.assert_close(phased[1, 12:14], torch.tensor([0., -1.]), atol=1e-6, rtol=0)
+        torch.testing.assert_close(phased[2, 12:], torch.tensor([0., 1., 0., 1.]), atol=1e-6, rtol=0)
         with self.assertRaises(HarnessError):
             conditioning_features([40] * 6, 0, tempo[:1], [{"position": 0, "timeSignature": [4, 4]}], [0])
+        with self.assertRaises(HarnessError):
+            conditioning_features([40] * 6, 0, tempo, [{"position": 0, "timeSignature": [4, 4]}], [0], first_full_bar_downbeat=-1)
         with self.assertRaises(HarnessError):
             audio_features(np.full((100, 1), np.nan, dtype=np.float32), 22050)
         with self.assertRaises(HarnessError):

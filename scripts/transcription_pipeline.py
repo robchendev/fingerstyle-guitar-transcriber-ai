@@ -34,7 +34,7 @@ def add_commands(commands):
     command.add_argument("--audio", help="Local audio file. Omit when supplying --video to extract its embedded soundtrack automatically.")
     for name in ("metadata", "checkpoint", "template", "beat-checkpoint", "output-directory"):
         command.add_argument("--" + name, required=True, help={
-            "metadata": "JSON with exact six pre-capo openStringMidi pitches in string6-to1 order, capoFret, tempo {bpm, beatUnit:[numerator,denominator]}, timeSignature:[numerator,denominator]. No assumed tuning or tempo.",
+            "metadata": "JSON with exact six pre-capo openStringMidi pitches in string6-to1 order, capoFret, tempo {bpm, beatUnit:[numerator,denominator]}, timeSignature:[numerator,denominator], and firstFullBarDownbeatSeconds. No assumed tuning, tempo, or pickup phase.",
             "beat-checkpoint": "Existing local Beat This! checkpoint; never downloaded automatically.",
             "template": "Existing modern GP template, read only.",
             "output-directory": "New dedicated directory under runs, or the identical existing job to resume.",
@@ -496,9 +496,12 @@ def _checkpoint(path, *, require_video):
 
 def _preflight(state):
     from .transcriber import inference_metadata
+    from .transcriber_runtime import checkpoint_identity
 
-    inference_metadata(read_json(state["options"]["metadata"]))
-    return _checkpoint(state["options"]["checkpoint"], require_video=bool(state["options"]["video"]))
+    checkpoint = _checkpoint(state["options"]["checkpoint"], require_video=bool(state["options"]["video"]))
+    conditioning_dim = checkpoint_identity(checkpoint)["model"]["conditioning_dim"]
+    inference_metadata(read_json(state["options"]["metadata"]), conditioning_dim)
+    return checkpoint
 
 
 def _execute(directory, state, *, review_flags=None):

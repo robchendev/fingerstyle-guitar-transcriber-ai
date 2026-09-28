@@ -151,7 +151,9 @@ class ModelConfig:
             _integer(name, getattr(self, name), 1)
         if self.architecture_version not in (1, 2, 3, 4):
             raise ValueError("architecture_version must be 1, 2, 3, or 4")
-        _integer("conditioning_dim", self.conditioning_dim, 12, 12)
+        _integer("conditioning_dim", self.conditioning_dim, 12, 16)
+        if self.conditioning_dim not in (12, 16):
+            raise ValueError("conditioning_dim must be 12 for historical inference or 16 for downbeat-conditioned training")
         _integer("max_fret", self.max_fret, 0, 127)
         _real("dropout", self.dropout, 0, 1)
         if self.dropout == 1:
@@ -162,8 +164,8 @@ class FingerstyleTranscriber(nn.Module):
     """Frequency-ordered convolutional frontend and conditioned bidirectional GRU.
 
     String axes are physical strings 6 through 1. Conditioning is the caller's
-    twelve audio-independent tuning/capo/tempo/beat-unit/meter features, never
-    ground-truth voices, attacks, score phase, or legend text.
+    Conditioning contains tuning/capo/tempo/beat-unit/meter and, for new
+    training, reviewed beat and bar phase. It never contains target events.
     """
 
     def __init__(self, config: ModelConfig):

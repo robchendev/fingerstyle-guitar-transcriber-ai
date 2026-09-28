@@ -499,11 +499,11 @@ class TrainingPreparationTests(unittest.TestCase):
         self.prepare_two()
         directory = self.workspace / "pairs" / "pair-A"
         labels, normalization = read_json(directory / "canonical.json"), read_json(directory / "normalization.json")
-        result = {"reference_indices": np.arange(4), "audio_indices": np.array([0, 1, 1, 2]), "local_costs": np.zeros(4), "diagnostics": {}}
-        with patch("scripts.prepare_training_data.audio_features", return_value=SimpleNamespace(times=np.arange(3, dtype=float))), patch("scripts.prepare_training_data.reference_features", return_value=SimpleNamespace(times=np.arange(4, dtype=float))), patch("scripts.prepare_training_data.align_first_attack", return_value=result):
+        result = {"reference_indices": np.arange(5), "audio_indices": np.array([0, 1, 1, 2, 3]), "local_costs": np.zeros(5), "diagnostics": {}}
+        with patch("scripts.prepare_training_data.audio_features", return_value=SimpleNamespace(times=np.arange(4, dtype=float))), patch("scripts.prepare_training_data.reference_features", return_value=SimpleNamespace(times=np.arange(5, dtype=float))), patch("scripts.prepare_training_data.align_first_attack", return_value=result):
             candidate = automatic_candidate(labels, normalization, directory / "trimmed.flac")
         self.assertEqual(candidate["method"], "first-attack-dtw")
-        self.assertEqual([point["clipSeconds"] for point in candidate["denseMapping"]], [0., 1., 1., 2.])
+        self.assertEqual([point["clipSeconds"] for point in candidate["denseMapping"]], [0., 1., 1., 2., 3.])
         self.assertEqual(candidate["timingRisks"], [{"kind": "score-time-plateau", "clipSeconds": 1., "referenceSecondsStart": 1., "referenceSecondsEnd": 2.}])
         self.run_cli("invalidate", "--id", "pair-A", "--reason", "synthetic plateau candidate")
         with patch("scripts.prepare_training_data.automatic_candidate", return_value=candidate):
@@ -564,6 +564,11 @@ class TrainingPreparationTests(unittest.TestCase):
             self.assertEqual(payload["canonical"], read_json(directory / "canonical.json"))
             self.assertEqual(payload["normalization"], read_json(directory / "normalization.json"))
             self.assertEqual(payload["approval"]["sourceGpSha256"], sha256(self.inputs / f"{entry['id']}.gp"))
+            self.assertEqual(
+                set(payload["downbeatConditioning"]),
+                {"pickupPresent", "scoreQuarter", "clipSeconds", "source"},
+            )
+            self.assertGreaterEqual(payload["downbeatConditioning"]["clipSeconds"], 0)
             self.assertFalse(payload["windows"][0]["targets"]["negativePercussionSupervision"])
             for window in payload["windows"]:
                 a, b = window["startSample"] / entry["sampleRate"], window["stopSampleExclusive"] / entry["sampleRate"]

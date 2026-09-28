@@ -1,8 +1,13 @@
 # Fretboard keypoint labeling
 
 This workflow samples native-resolution frames on Windows, supports annotation
-in a local browser on macOS, and exports labels for YOLO training on Windows.
+in a local browser on macOS, and exports portable labels for YOLO training.
 The dataset is stored under `data/`, which is excluded from Git.
+
+Current branch status: all 400 pilot frames are annotated and exported (322
+train, 32 validation, 46 test). The 4K nano pose detector is currently training
+on the M3 Max CPU. Pinned Ultralytics `8.3.102` warns that Apple MPS has a known
+pose bug, so this run must not use `mps`.
 
 ## Keypoints
 
@@ -141,7 +146,7 @@ only for failure modes found on held-out videos.
 
 ## Next steps after manual annotation
 
-### 1. Export completed frames on Windows
+### 1. Export completed frames on Windows (complete)
 
 ```powershell
 .\scripts\video-evidence\.venv\Scripts\python.exe -m scripts.fretboard_annotation export --dataset data\fretboard-keypoints
@@ -151,7 +156,7 @@ The command writes `labels/` and `data.yaml`. Incomplete frames remain saved in
 `annotations.json` but are not exported. Fully reviewed guitar-absent frames
 are exported as negative examples.
 
-### 2. Audit the exported dataset
+### 2. Audit the exported dataset (complete)
 
 Before training:
 
@@ -165,12 +170,10 @@ The current exporter validates coordinate ranges, point order at visible
 anchors, and degenerate pairs. A separate visual dataset-audit command is
 still to be implemented before production training.
 
-### 3. Train a pilot YOLO pose model on Windows
+### 3. Train a pilot YOLO pose model (current)
 
-The images and labels preserve native 4K coordinates. Full 4K training means
-using `imgsz=3840`; it will normally require a CUDA GPU and a small batch.
-Start with the nano pose architecture and batch size one, then increase the
-batch only if GPU memory permits.
+The images and labels preserve native 4K coordinates. Full 4K training uses
+`imgsz=3840`, the nano pose architecture and batch size one.
 
 Install pinned training dependencies:
 
@@ -184,13 +187,25 @@ Validate the request without training:
 .\.venv\Scripts\python.exe -m scripts.fretboard_training --dataset data\fretboard-keypoints --output runs\fretboard-detector --device 0 --dry-run
 ```
 
-Run 4K training yourself with live output and a saved log:
+The current M3 Max CPU command is:
+
+```bash
+caffeinate .venv/bin/python -m scripts.fretboard_training --dataset data/fretboard-keypoints --output runs/fretboard-detector --image-size 3840 --batch-size 1 --epochs 200 --patience 30 --device cpu --workers 6 2>&1 | tee runs/fretboard-detector-training.log
+```
+
+On a Windows machine with an NVIDIA GPU, use:
 
 ```powershell
 .\.venv\Scripts\python.exe -m scripts.fretboard_training --dataset data\fretboard-keypoints --output runs\fretboard-detector --image-size 3840 --batch-size 1 --epochs 200 --patience 30 --device 0 2>&1 | Tee-Object -FilePath runs\fretboard-detector-training.log
 ```
 
-Resume from Ultralytics `last.pt`:
+Resume the current macOS CPU run from Ultralytics `last.pt` with:
+
+```bash
+caffeinate .venv/bin/python -m scripts.fretboard_training --dataset data/fretboard-keypoints --output runs/fretboard-detector --image-size 3840 --batch-size 1 --epochs 200 --patience 30 --device cpu --workers 6 --resume runs/fretboard-detector/weights/last.pt 2>&1 | tee runs/fretboard-detector-resume.log
+```
+
+Windows/NVIDIA resume:
 
 ```powershell
 .\.venv\Scripts\python.exe -m scripts.fretboard_training --dataset data\fretboard-keypoints --output runs\fretboard-detector --image-size 3840 --batch-size 1 --epochs 200 --patience 30 --device 0 --resume runs\fretboard-detector\weights\last.pt 2>&1 | Tee-Object -FilePath runs\fretboard-detector-resume.log

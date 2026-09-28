@@ -8,7 +8,7 @@ import torch
 
 from .score_alignment import ScoreClock
 from .training_windows import projected_targets
-from .transcriber_audio import HarnessError
+from .transcriber_audio import BASE_CONDITIONING_DIM, HarnessError
 from .transcriber_data import PAIRED_TECHNIQUE_TARGET_POLICY, training_conditioning
 from .connection_supervision import RELATION_TYPES, SUPERVISION_VERSION, V4_NOTE_TECHNIQUE_TYPES
 
@@ -296,6 +296,9 @@ def evaluate_events(model, dataset, device, *, tolerances=(.05, .1, .2), onset_t
     if not tolerances or len(set(tolerances)) != len(tolerances) or any(not math.isfinite(value) or value <= 0 for value in tolerances):
         raise HarnessError("Supply unique positive event tolerances in seconds.")
     config = dataset.feature_config
+    conditioning_dim = getattr(
+        getattr(dataset, "model_config", None), "conditioning_dim", BASE_CONDITIONING_DIM,
+    )
     records = []
     totals = {}
     video_identity = getattr(dataset, "video_identity", None)
@@ -345,7 +348,9 @@ def evaluate_events(model, dataset, device, *, tolerances=(.05, .1, .2), onset_t
                     dataset.check_unchanged()
                     features, local_times = dataset._features(record, window)
                     local_times = local_times + window["startSample"] / rate
-                    conditioning = training_conditioning(record, local_times)
+                    conditioning = training_conditioning(
+                        record, local_times, conditioning_dim,
+                    )
                     optional = {}
                     if callable(getattr(dataset, "video_window", None)):
                         video = dataset.video_window(record, local_times)

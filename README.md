@@ -59,10 +59,15 @@ The included transcription model is at [`models/transcriber.pt`](models/transcri
 Supply a GP or GPT template for the page layout. Exported files clear the template's artist, arranger and lyricist credits.
 
 ```powershell
-.\.venv\Scripts\python.exe .\transcribe_video.py --video 'data\inputs\performance.mp4' --checkpoint 'models\transcriber.pt' --template 'data\template.gpt' --beat-checkpoint '.tools\models\beat-this-final0.ckpt' --plucking-screen-side left --note-cutoff 0.8 --x-cutoff 0.3 --output-directory 'runs\transcription' --tuning E2 A2 D3 G3 B3 E4 --capo 0 --bpm 120 --beat-unit 1/4 --time-signature 4/4
+.\.venv\Scripts\python.exe .\transcribe_video.py --video 'data\inputs\performance.mp4' --checkpoint 'models\transcriber.pt' --template 'data\template.gpt' --beat-checkpoint '.tools\models\beat-this-final0.ckpt' --plucking-screen-side left --note-cutoff 0.8 --x-cutoff 0.3 --output-directory 'runs\transcription' --tuning E2 A2 D3 G3 B3 E4 --capo 0 --bpm 120 --beat-unit 1/4 --time-signature 4/4 --first-full-bar-downbeat 0
 ```
 
 List tuning from string 6 to string 1. Set the plucking side to its position on screen, not the player's handedness. The command extracts audio, tracks hands and exports full-voice and single-voice GP drafts. It reports progress and any timing corrections needed. Repeat the same command to resume; changed inputs require a new output directory.
+
+Set `--first-full-bar-downbeat` to the audio timestamp of beat 1 in the first
+complete bar after any pickup. Use `0` when the recording starts on that
+downbeat. New downbeat-conditioned checkpoints require this input; historical
+checkpoints ignore it.
 
 Adjust export cutoffs without rerunning the model or processing the video:
 
@@ -77,6 +82,11 @@ Both commands support `--dry-run` to preview their settings. A cutoff of `0.8` d
 **Important: Every training video must start exactly on the first beat of the song at timestamp 0.** Trim the lead-in before preparing the dataset, keeping the audio and video synchronized.
 
 See [training with your own videos and scores](docs/TRAINING.md) for data preparation, review and training. To transcribe with your trained model, pass its `best-events.pt` or `latest.pt` to `--checkpoint`. The bundled model cannot resume training.
+
+The Eddie corpus has a dedicated
+[tuning/capo correction handoff](docs/CAPO_NORMALIZATION_HANDOFF.md) for
+replacing convenience-normalized GP settings with the physical tuning and capo
+filmed in each training video before rebuilding the release.
 
 ## Limits
 

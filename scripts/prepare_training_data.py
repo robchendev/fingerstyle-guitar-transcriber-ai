@@ -485,6 +485,27 @@ def parse_ranges(values, duration):
     return ranges
 
 
+def first_full_bar_downbeat(labels, candidate, pickup):
+    visits = labels["measureVisits"]
+    if type(pickup) is not bool or pickup and len(visits) < 2:
+        raise ValueError("Pickup conditioning requires a following full measure.")
+    quarter = fraction(
+        visits[1 if pickup else 0]["onsetQuarter"],
+        "first full-bar downbeat",
+    )
+    mapping = candidate["denseMapping"]
+    score_quarters = np.array([point["scoreQuarter"] for point in mapping], dtype=float)
+    clip_seconds = np.array([point["clipSeconds"] for point in mapping], dtype=float)
+    if not len(mapping) or not score_quarters[0] <= float(quarter) <= score_quarters[-1]:
+        raise ValueError("First full-bar downbeat lies outside the reviewed alignment.")
+    return {
+        "pickupPresent": pickup,
+        "scoreQuarter": [quarter.numerator, quarter.denominator],
+        "clipSeconds": float(np.interp(float(quarter), score_quarters, clip_seconds)),
+        "source": "normalized-gp-pickup-and-reviewed-score-audio-alignment",
+    }
+
+
 def effective_ranges(approved, excluded, mapping):
     if not mapping and approved:
         raise ValueError("Provide at least two explicit manual anchors before approving ranges without a usable automatic candidate.")
@@ -658,6 +679,9 @@ def release_dataset(workspace, version, validation_groups, identifiers=None, *, 
         ranges = effective_ranges(review["requestedClipRanges"], review["excludedClipRanges"], candidate["denseMapping"])
         if ranges != approval.get("approvedClipRanges") or approval.get("candidateSha256") != candidate_digest(candidate) or approval.get("sourceGpSha256") != state["inputs"]["sourceGpSha256"] or approval.get("audioSha256") != state["audio"]["sha256"]:
             raise ValueError("Approval no longer matches this source, candidate or approved ranges.")
+        downbeat = first_full_bar_downbeat(
+            labels, candidate, read_json(directory / "notation.json")["normalizedPickup"],
+        )
         rate = state["audio"]["sampleRate"]
         spans = range_sample_bounds(ranges, rate)
         notes, gestures = projected_targets(labels, candidate, clock)
@@ -672,6 +696,7 @@ def release_dataset(workspace, version, validation_groups, identifiers=None, *, 
         payload = {
             "schemaVersion": 1, "kind": "local-training-targets", "id": pair["id"],
             "canonical": labels, "normalization": normalization, "candidate": candidate, "windows": windows,
+            "downbeatConditioning": downbeat,
             "approval": approval, "sourceAudioSha256": state["inputs"]["sourceAudioSha256"],
             "preparationSha256": candidate_digest(state),
             "preparationRuntime": state["inputs"]["runtime"], "preparationImplementation": state["inputs"]["implementation"],

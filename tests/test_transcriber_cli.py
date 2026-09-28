@@ -42,7 +42,7 @@ class HarnessCommandTests(unittest.TestCase):
                 transcriber.load_config(str(path))
 
     def metadata(self):
-        return {"openStringMidi": [40, 45, 50, 55, 59, 64], "capoFret": 0, "tempo": {"bpm": 100, "beatUnit": [1, 4]}, "timeSignature": [4, 4]}
+        return {"openStringMidi": [40, 45, 50, 55, 59, 64], "capoFret": 0, "tempo": {"bpm": 100, "beatUnit": [1, 4]}, "timeSignature": [4, 4], "firstFullBarDownbeatSeconds": 0}
 
     def test_train_and_resume_require_no_acknowledgement_flag(self):
         from scripts.transcriber_video import VideoConfig
@@ -194,6 +194,9 @@ class HarnessCommandTests(unittest.TestCase):
         tempos, meters = transcriber.inference_metadata(value)
         self.assertEqual(tempos[0]["bpm"], 100)
         self.assertEqual(meters[0]["timeSignature"], [4, 4])
+        historical = dict(value)
+        del historical["firstFullBarDownbeatSeconds"]
+        transcriber.inference_metadata(historical, conditioning_dim=12)
         for field in value:
             invalid = dict(value)
             del invalid[field]
@@ -285,7 +288,8 @@ class HarnessCommandTests(unittest.TestCase):
                 return {"notes": [], "percussion": [], "policy": {"synthetic": True}}
 
             args = SimpleNamespace(checkpoint=str(checkpoint_path), device="cpu", metadata=str(metadata), audio=str(audio), output="runs/prediction.json", data_root=root, onset_threshold=.5, percussion_threshold=.5)
-            with patch.object(transcriber, "checkpoint_model", return_value=(ConstantModel(), {"identity": {"features": asdict(feature_config)}}, torch.device("cpu"))), patch.dict("sys.modules", {"scripts.transcriber_model": SimpleNamespace(decode_events=decode)}):
+            identity = {"features": asdict(feature_config), "model": {"conditioning_dim": 16}}
+            with patch.object(transcriber, "checkpoint_model", return_value=(ConstantModel(), {"identity": identity}, torch.device("cpu"))), patch.dict("sys.modules", {"scripts.transcriber_model": SimpleNamespace(decode_events=decode)}):
                 result = transcriber.infer(args)
             self.assertEqual(len(captured["times"]), 700)
             torch.testing.assert_close(captured["outputs"]["note_onset_logits"], torch.full((700, 6), 2.))

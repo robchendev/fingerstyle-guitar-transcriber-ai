@@ -60,7 +60,7 @@ class PairedCommandTests(unittest.TestCase):
         video["structured_available"][:, 2, 98:140] = True
         percussion = torch.zeros(2, 3)
         percussion[0, 0] = 1
-        item = {"features": torch.zeros(2, base[1].n_mels), "conditioning": torch.zeros(2, 12), "video": video,
+        item = {"features": torch.zeros(2, base[1].n_mels), "conditioning": torch.zeros(2, 16), "video": video,
                 "metadata": {"stringFrameCollisionsMasked": 0}, "targets": {"percussion": percussion},
                 "masks": {"percussion": torch.ones(2, 3, dtype=torch.bool)}}
 

@@ -5,8 +5,9 @@
 - Branch: `fretboard-modelling`
 - Local only; nothing pushed
 - Implementation plan: complete
-- Current blocker: manual seven-point annotation
-- Full root suite: 704 passed
+- Current stage: 4K detector training on the M3 Max CPU
+- Full 400-frame seven-point annotation: complete
+- Full root suite: 715 passed
 - Focused vision suites: passed
 - Untracked plan: `_plan-fretboard-modelling.md`
 
@@ -31,6 +32,8 @@
 - Learning-rate reduction
 - Audio, original-hands, role-gates, and geometry experiment modes
 - Historical architecture-4/5 inference loading
+- Required first-full-bar downbeat conditioning for new 16-feature models
+- Historical 12-feature checkpoint inference compatibility
 
 ## Private artifacts
 
@@ -79,7 +82,7 @@ frame was fully reviewed; off-screen points may remain unavailable.
 
 ## Remaining required steps
 
-### 1. Annotate the pilot dataset
+### 1. Annotate the pilot dataset (complete)
 
 Windows:
 
@@ -95,7 +98,7 @@ python -m scripts.fretboard_annotation serve --dataset data/fretboard-keypoints
 
 The UI autosaves and resumes through `annotations.json`.
 
-### 2. Export completed annotations
+### 2. Export completed annotations (complete)
 
 ```powershell
 .\scripts\video-evidence\.venv\Scripts\python.exe -m scripts.fretboard_annotation export --dataset data\fretboard-keypoints
@@ -103,28 +106,60 @@ The UI autosaves and resumes through `annotations.json`.
 
 ### 3. Install detector dependencies
 
+Windows:
+
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r requirements-fretboard.txt
 ```
 
+macOS:
+
+```bash
+.venv/bin/python -m pip install -r requirements-fretboard.txt
+```
+
 ### 4. Validate the detector-training request
+
+Windows/NVIDIA:
 
 ```powershell
 .\.venv\Scripts\python.exe -m scripts.fretboard_training --dataset data\fretboard-keypoints --output runs\fretboard-detector --device 0 --dry-run
 ```
 
-### 5. Train the 4K detector
+macOS CPU:
 
-Run this manually:
+```bash
+.venv/bin/python -m scripts.fretboard_training --dataset data/fretboard-keypoints --output runs/fretboard-detector --device cpu --dry-run
+```
+
+### 5. Train the 4K detector (current)
+
+The current run uses the M3 Max CPU because pinned Ultralytics `8.3.102`
+explicitly warns that Apple MPS has a known pose bug in training, validation and
+prediction. Do not switch this pose run to `mps`.
+
+Current macOS command:
+
+```bash
+caffeinate .venv/bin/python -m scripts.fretboard_training --dataset data/fretboard-keypoints --output runs/fretboard-detector --image-size 3840 --batch-size 1 --epochs 200 --patience 30 --device cpu --workers 6 2>&1 | tee runs/fretboard-detector-training.log
+```
+
+Windows/NVIDIA command:
 
 ```powershell
 .\.venv\Scripts\python.exe -m scripts.fretboard_training --dataset data\fretboard-keypoints --output runs\fretboard-detector --image-size 3840 --batch-size 1 --epochs 200 --patience 30 --device 0 2>&1 | Tee-Object -FilePath runs\fretboard-detector-training.log
 ```
 
-Resume:
+Windows/NVIDIA resume:
 
 ```powershell
 .\.venv\Scripts\python.exe -m scripts.fretboard_training --dataset data\fretboard-keypoints --output runs\fretboard-detector --image-size 3840 --batch-size 1 --epochs 200 --patience 30 --device 0 --resume runs\fretboard-detector\weights\last.pt 2>&1 | Tee-Object -FilePath runs\fretboard-detector-resume.log
+```
+
+macOS CPU resume:
+
+```bash
+caffeinate .venv/bin/python -m scripts.fretboard_training --dataset data/fretboard-keypoints --output runs/fretboard-detector --image-size 3840 --batch-size 1 --epochs 200 --patience 30 --device cpu --workers 6 --resume runs/fretboard-detector/weights/last.pt 2>&1 | tee runs/fretboard-detector-resume.log
 ```
 
 ### 6. Review held-out complete-video overlays

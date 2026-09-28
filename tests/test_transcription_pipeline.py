@@ -294,6 +294,7 @@ class TranscriptionPipelineTests(unittest.TestCase):
             "--plucking-screen-side", "left",
             "--tuning", "38", "45", "50", "55", "59", "64", "--capo", "2",
             "--bpm", "100", "--beat-unit", "1/4", "--time-signature", "3/4",
+            "--first-full-bar-downbeat", "0",
             "--note-cutoff", ".78", "--x-cutoff", ".1",
         ]
         real_pipeline = pipeline.run_transcription

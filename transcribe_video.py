@@ -53,6 +53,16 @@ def ratio(value):
     return [numerator, denominator]
 
 
+def nonnegative_seconds(value):
+    try:
+        seconds = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("Timestamp must be a number of seconds.") from None
+    if not math.isfinite(seconds) or seconds < 0:
+        raise argparse.ArgumentTypeError("Timestamp must be finite and nonnegative.")
+    return seconds
+
+
 def cutoff(value):
     value = float(value)
     if not math.isfinite(value) or not 0 <= value <= 1:
@@ -73,6 +83,10 @@ def argument_parser():
     parser.add_argument("--bpm", type=float, required=True)
     parser.add_argument("--beat-unit", type=ratio, required=True, help="BPM unit as a fraction of a whole note: 1/4 for quarter notes, 3/8 for dotted quarters.")
     parser.add_argument("--time-signature", type=ratio, required=True, help="Meter, e.g. 4/4 or 6/8.")
+    parser.add_argument(
+        "--first-full-bar-downbeat", type=nonnegative_seconds, required=True,
+        help="Audio timestamp of beat 1 in the first full bar after any pickup; use 0 when the song starts on that downbeat.",
+    )
     parser.add_argument("--plucking-screen-side", choices=("geometry", "left", "right"), help="Override the hand-side setting in the local preset for this video.")
     parser.add_argument("--settings", help="Optional local version-1 model/template/export preset; explicit options take precedence.")
     parser.add_argument("--checkpoint", help="Model checkpoint; defaults to models/transcriber.pt when not provided by settings.")
@@ -90,6 +104,7 @@ def prepare(args):
         "openStringMidi": args.tuning, "capoFret": args.capo,
         "tempo": {"bpm": args.bpm, "beatUnit": args.beat_unit},
         "timeSignature": args.time_signature, "tempoChanges": [], "timeSignatureChanges": [],
+        "firstFullBarDownbeatSeconds": args.first_full_bar_downbeat,
     }
     transcriber.inference_metadata(metadata)
     if Fraction(*args.beat_unit) not in TEMPO_BEAT_UNITS.values():

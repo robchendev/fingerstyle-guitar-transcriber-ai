@@ -48,6 +48,7 @@ def release_scope(records):
         "candidateSha256": payload["approval"]["candidateSha256"],
         "approvedClipRanges": payload["approval"]["approvedClipRanges"],
         "windowsSha256": candidate_digest(payload["windows"]),
+        **({"downbeatConditioning": payload["downbeatConditioning"]} if "downbeatConditioning" in payload else {}),
         **({"percussionAnnotationsComplete": payload["approval"]["percussionAnnotationsComplete"]} if "percussionAnnotationsComplete" in payload["approval"] else {}),
         **({"voiceSupervisionPolicy": payload["approval"]["voiceSupervisionPolicy"]} if "voiceSupervisionPolicy" in payload["approval"] else {}),
     } for entry, payload in records]
@@ -160,6 +161,41 @@ def _validate_payload(entry, payload):
     mapping = payload["candidate"]["denseMapping"]
     duration = entry["sampleCount"] / entry["sampleRate"]
     validate_mapping(mapping, clock, duration)
+    downbeat = payload.get("downbeatConditioning")
+    if downbeat is not None:
+        if not isinstance(downbeat, dict) or set(downbeat) != {
+            "pickupPresent", "scoreQuarter", "clipSeconds", "source",
+        }:
+            raise ValueError("Downbeat conditioning has an unsupported contract.")
+        if type(downbeat["pickupPresent"]) is not bool or downbeat["source"] != "normalized-gp-pickup-and-reviewed-score-audio-alignment":
+            raise ValueError("Downbeat conditioning provenance is invalid.")
+        quarter = downbeat["scoreQuarter"]
+        if (
+            not isinstance(quarter, list) or len(quarter) != 2
+            or any(type(value) is not int for value in quarter)
+            or quarter[1] <= 0
+        ):
+            raise ValueError("Downbeat score position must be an exact fraction.")
+        expected_quarter = clock.measure_starts[1 if downbeat["pickupPresent"] else 0]
+        if quarter[0] / quarter[1] != float(expected_quarter):
+            raise ValueError("Downbeat score position differs from the normalized pickup contract.")
+        seconds = downbeat["clipSeconds"]
+        if type(seconds) not in (int, float) or not math.isfinite(seconds) or not 0 <= seconds <= duration:
+            raise ValueError("Downbeat timestamp must lie inside the released audio.")
+        left = max(
+            index for index, point in enumerate(mapping)
+            if point["scoreQuarter"] <= float(expected_quarter)
+        )
+        right = min(left + 1, len(mapping) - 1)
+        a, b = mapping[left], mapping[right]
+        expected_seconds = a["clipSeconds"] if a["scoreQuarter"] == b["scoreQuarter"] else (
+            a["clipSeconds"]
+            + (float(expected_quarter) - a["scoreQuarter"])
+            * (b["clipSeconds"] - a["clipSeconds"])
+            / (b["scoreQuarter"] - a["scoreQuarter"])
+        )
+        if not math.isclose(seconds, expected_seconds, abs_tol=1e-8):
+            raise ValueError("Downbeat timestamp differs from the reviewed score-audio alignment.")
     if mapping_risks(mapping) and approval.get("uncertaintyAcknowledged") is not True:
         raise ValueError("Timing plateaus require explicit source-bound uncertainty acceptance and approved ranges.")
     ranges = approval["approvedClipRanges"]
