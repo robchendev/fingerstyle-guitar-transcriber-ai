@@ -34,6 +34,7 @@
 - Historical architecture-4/5 inference loading
 - Required first-full-bar downbeat conditioning for new 16-feature models
 - Historical 12-feature checkpoint inference compatibility
+- Identity-preserving horizontal augmentation for physical string keypoints
 
 ## Private artifacts
 

@@ -988,7 +988,7 @@ def export_yolo(dataset):
         "val: images/validation",
         "test: images/test",
         "kpt_shape: [7, 3]",
-        "flip_idx: [1, 0, 3, 2, 5, 4, 6]",
+        "flip_idx: [0, 1, 2, 3, 4, 5, 6]",
         "names:",
         "  0: fretboard",
         "",

@@ -452,7 +452,9 @@ class FretboardAnnotationTests(unittest.TestCase):
             self.assertEqual(export_yolo(root), {"train": 1, "validation": 0, "test": 0})
             fields = (root / "labels" / "train" / "frame.txt").read_text().split()
             self.assertEqual(len(fields), 5 + 7 * 3)
-            self.assertIn("kpt_shape: [7, 3]", (root / "data.yaml").read_text())
+            yaml = (root / "data.yaml").read_text()
+            self.assertIn("kpt_shape: [7, 3]", yaml)
+            self.assertIn("flip_idx: [0, 1, 2, 3, 4, 5, 6]", yaml)
 
 
 if __name__ == "__main__":

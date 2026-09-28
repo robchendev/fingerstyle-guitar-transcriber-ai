@@ -128,6 +128,9 @@ keypoints are exported as negative examples.
 The seven-keypoint labels use normalized coordinates, so moving the dataset
 between macOS and Windows does not change them. Source images remain at native
 resolution; model training can use 4K or a lower `imgsz` without relabeling.
+Horizontal augmentation preserves each physical string identity; unlike
+anatomical left/right landmarks, string 6 and string 1 must not exchange label
+indices when an image is mirrored.
 
 ## Expected effort
 
