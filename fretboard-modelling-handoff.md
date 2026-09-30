@@ -5,8 +5,10 @@
 - Branch: `fretboard-modelling`
 - Local only; nothing pushed
 - Implementation plan: complete
-- Current stage: 4K detector training on the M3 Max CPU
+- Current stage: expanding detector annotations to 2,000 selected frames
 - Full 400-frame seven-point annotation: complete
+- Mac-only cleaned dataset: 384 frames (336/30/18)
+- Ultralytics Platform detector result: 0.83 pose mAP50-95
 - Full root suite: 715 passed
 - Focused vision suites: passed
 - Untracked plan: `_plan-fretboard-modelling.md`
@@ -35,6 +37,8 @@
 - Required first-full-bar downbeat conditioning for new 16-feature models
 - Historical 12-feature checkpoint inference compatibility
 - Identity-preserving horizontal augmentation for physical string keypoints
+- Incremental 2,000-frame `data\dataset2` selection with explicit 1,750/156/94
+  targets, preserved source splits and copied seed annotations
 
 ## Private artifacts
 
@@ -133,13 +137,14 @@ macOS CPU:
 .venv/bin/python -m scripts.fretboard_training --dataset data/fretboard-keypoints --output runs/fretboard-detector --device cpu --dry-run
 ```
 
-### 5. Train the 4K detector (current)
+### 5. Train the 4K detector (completed externally)
 
-The current run uses the M3 Max CPU because pinned Ultralytics `8.3.102`
+The earlier local run used the M3 Max CPU because pinned Ultralytics `8.3.102`
 explicitly warns that Apple MPS has a known pose bug in training, validation and
-prediction. Do not switch this pose run to `mps`.
+prediction. Ultralytics Platform training subsequently produced the current
+0.83 pose mAP50-95 detector.
 
-Current macOS command:
+Historical local macOS command:
 
 ```bash
 caffeinate .venv/bin/python -m scripts.fretboard_training --dataset data/fretboard-keypoints --output runs/fretboard-detector --image-size 3840 --batch-size 1 --epochs 200 --patience 30 --device cpu --workers 6 2>&1 | tee runs/fretboard-detector-training.log

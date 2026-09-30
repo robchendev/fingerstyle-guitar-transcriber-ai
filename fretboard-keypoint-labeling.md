@@ -4,10 +4,18 @@ This workflow samples native-resolution frames on Windows, supports annotation
 in a local browser on macOS, and exports portable labels for YOLO training.
 The dataset is stored under `data/`, which is excluded from Git.
 
-Current branch status: all 400 pilot frames are annotated and exported (322
-train, 32 validation, 46 test). The 4K nano pose detector is currently training
-on the M3 Max CPU. Pinned Ultralytics `8.3.102` warns that Apple MPS has a known
-pose bug, so this run must not use `mps`.
+Current branch status: this machine retains the original 400 annotated pilot
+frames (322 train, 32 validation, 46 test). On the Mac, the owner removed 16
+unusable frames and rearranged the remaining 384 to 336 train, 30 validation
+and 18 test. Training on Ultralytics Platform reached 0.83 pose mAP50-95; that
+updated dataset and checkpoint are not on this machine.
+
+`data\dataset2` extends the local 400-frame pilot to a 2,000-frame annotation
+set. Its explicit target is 1,750 train, 156 validation and 94 test frames,
+which preserves the owner's 336/30/18 ratio. The 400 seed images and annotations
+remain first and unchanged; 1,600 new frames follow. Unusable seed or new
+images still count toward the 2,000 selection target and may be removed manually
+on the Mac.
 
 ## Keypoints
 
@@ -35,6 +43,12 @@ estimate an off-screen nut or bridge.
 `Complete` means the entire frame has been reviewed. It does not require all
 seven points to be available.
 
+Use **Disable this image** when blur, darkness, corruption or other source
+quality makes the frame unsuitable for training. Disabled frames count as
+reviewed in the UI, appear gray in the progress strip and are omitted from
+YOLO exports. They are not exported as negative examples and can be re-enabled
+later.
+
 ## Create the dataset on Windows
 
 From the repository root:
@@ -47,6 +61,22 @@ Frames retain native resolution. Selection uses source-bound hand observations,
 prefers two-hand playing frames, limits zero-hand negatives to 5%, uses
 available shot reports, and deduplicates visual views across the corpus.
 Candidate descriptors are cached per video for resumable selection.
+
+To extend an existing annotated dataset after all authorized source videos and
+their 32-frame candidate caches exist:
+
+```powershell
+.\scripts\video-evidence\.venv\Scripts\python.exe -m scripts.fretboard_annotation extend --base-dataset data\fretboard-keypoints --output data\dataset2 --video-directory runs\video-evidence\sources --train-frames 1750 --validation-frames 156 --test-frames 94 --maximum-per-video 12 --cache-directory data\fretboard-selection-cache
+```
+
+The extension keeps every represented source video in its existing split,
+assigns each previously unseen video deterministically in the requested ratio,
+rejects candidates within 0.5 seconds of an existing frame from that video,
+and selects visual diversity independently inside each split. It copies only
+the completed seed annotations; all added frames begin incomplete in the same
+custom annotation UI. The extension deliberately removes `data.yaml` and
+generated labels so incomplete new images cannot be mistaken for negative
+training examples. Run `export` only after reviewing the intended training set.
 
 ## Test the UI now on Windows
 
@@ -190,7 +220,7 @@ Validate the request without training:
 .\.venv\Scripts\python.exe -m scripts.fretboard_training --dataset data\fretboard-keypoints --output runs\fretboard-detector --device 0 --dry-run
 ```
 
-The current M3 Max CPU command is:
+The historical M3 Max CPU fallback command is:
 
 ```bash
 caffeinate .venv/bin/python -m scripts.fretboard_training --dataset data/fretboard-keypoints --output runs/fretboard-detector --image-size 3840 --batch-size 1 --epochs 200 --patience 30 --device cpu --workers 6 2>&1 | tee runs/fretboard-detector-training.log

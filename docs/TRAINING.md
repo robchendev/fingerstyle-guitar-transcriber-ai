@@ -128,6 +128,10 @@ select a point, `Q`/`W`/`E` for available/occluded/unavailable status, and
 Enter to complete and advance. `Complete` means the frame was fully reviewed,
 not that all seven landmarks are visible.
 
+Use **Disable this image** for unusably dark, blurred or corrupt frames.
+Disabled frames count as reviewed but are excluded from the generated split
+lists and labels; they never become negative training examples.
+
 Export completed annotations to YOLO pose labels and `data.yaml`:
 
 ```powershell
@@ -137,6 +141,13 @@ Export completed annotations to YOLO pose labels and `data.yaml`:
 Images retain their native resolution and labels use normalized coordinates.
 The eventual training `imgsz` is a separate model-training choice; native 4K
 sources may be trained at 4K or downscaled without relabeling.
+
+To expand an existing reviewed detector set without changing its annotations or
+source-level splits, use the incremental workflow documented in
+[`fretboard-keypoint-labeling.md`](../fretboard-keypoint-labeling.md). The
+current `data\dataset2` target is 2,000 selected frames split
+1,750/156/94. New frames remain incomplete and are excluded from YOLO export
+until they are reviewed in the custom UI.
 
 ### Reading fretboard-detector training output
 

@@ -25,6 +25,7 @@ from scripts.fretboard_annotation import (
     _hand_evidence_times,
     _sample_evidence_times,
     _candidate_times,
+    extend_dataset,
     select_diverse_candidates,
     parser,
     validate_geometry,
@@ -78,6 +79,26 @@ class FretboardAnnotationTests(unittest.TestCase):
         self.assertNotIn("dotRadius+(i==selected", HTML)
         self.assertIn("function placeAt(e)", HTML)
         self.assertIn("else if(placing){placeAt(e)}", HTML)
+
+    def test_source_metadata_reads_detector_only_ytdlp_receipts(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "detector-eddie-video"
+            source.mkdir()
+            (source / "source.info.json").write_text(json.dumps({
+                "title": "Detector-only source",
+                "webpage_url": "https://www.youtube.com/watch?v=abcdefghijk",
+            }))
+            from scripts.fretboard_annotation import _source_metadata
+            metadata = _source_metadata(
+                pairs_path=root / "missing-pairs.json",
+                source_map_path=root / "missing-map.json",
+                sources_directory=root,
+            )
+            self.assertEqual(metadata["detector-eddie-video"], {
+                "title": "Detector-only source",
+                "sourceUrl": "https://www.youtube.com/watch?v=abcdefghijk",
+            })
         self.assertNotIn("selectPoint(Math.min(5,selected+1))", HTML)
         self.assertIn("ctx.moveTo(left,cursorY)", HTML)
         self.assertIn("ctx.moveTo(cursorX,top)", HTML)
@@ -104,6 +125,11 @@ class FretboardAnnotationTests(unittest.TestCase):
         self.assertIn('e.key.toLowerCase()=="w"', HTML)
         self.assertIn('e.key.toLowerCase()=="e"', HTML)
         self.assertIn('id="captureArrows"', HTML)
+        self.assertIn('id="disabled"', HTML)
+        self.assertIn('if(value?.disabled)return "disabled"', HTML)
+        self.assertIn("Reviewed ${reviewed}/${state.manifest.records.length}", HTML)
+        self.assertIn("async function setImageDisabled(disabled)", HTML)
+        self.assertIn("value.disabled=previousDisabled", HTML)
         self.assertIn('&&captureArrows){e.preventDefault();e.stopPropagation()', HTML)
         self.assertIn("document.activeElement.blur()", HTML)
         self.assertNotIn("localStorage", HTML)
@@ -164,6 +190,16 @@ class FretboardAnnotationTests(unittest.TestCase):
         )
         self.assertEqual(len(selected), 3)
         self.assertEqual(len({row["id"] for row in selected}), 3)
+
+    def test_diversity_selection_allows_empty_optional_pool_when_target_is_met(self):
+        initial = [{
+            "id": "seed", "videoSha256": "a", "seconds": 0.,
+            "feature": np.ones(4, np.float32), "quality": 1.,
+        }]
+        self.assertEqual(
+            select_diverse_candidates([], 1, minimum_per_video=0, initial=initial),
+            initial,
+        )
 
     def test_candidate_times_use_matching_shot_midpoints(self):
         with TemporaryDirectory() as directory:
@@ -410,7 +446,18 @@ class FretboardAnnotationTests(unittest.TestCase):
         value = normalize_annotation(annotation())
         self.assertEqual(len(value["points"]), 7)
         self.assertTrue(value["complete"])
+        self.assertFalse(value["disabled"])
         validate_geometry(value["points"])
+
+    def test_disabled_annotation_is_reviewed_but_cannot_be_complete(self):
+        value = annotation()
+        value["complete"] = False
+        value["disabled"] = True
+        normalized = normalize_annotation(value)
+        self.assertTrue(normalized["disabled"])
+        value["complete"] = True
+        with self.assertRaisesRegex(ValueError, "cannot also be complete"):
+            normalize_annotation(value)
 
     def test_complete_geometry_allows_unavailable_out_of_frame_anchors(self):
         value = annotation()
@@ -455,6 +502,95 @@ class FretboardAnnotationTests(unittest.TestCase):
             yaml = (root / "data.yaml").read_text()
             self.assertIn("kpt_shape: [7, 3]", yaml)
             self.assertIn("flip_idx: [0, 1, 2, 3, 4, 5, 6]", yaml)
+            self.assertIn("train: train.txt", yaml)
+            self.assertEqual((root / "train.txt").read_text().strip(), "./images/train/frame.jpg")
+
+            disabled = annotation()
+            disabled["complete"] = False
+            disabled["disabled"] = True
+            (root / "annotations.json").write_text(json.dumps({
+                "schemaVersion": 1,
+                "kind": "fretboard-keypoint-annotations",
+                "keypoints": list(KEYPOINTS),
+                "items": {"frame": disabled},
+            }))
+            self.assertEqual(export_yolo(root), {"train": 0, "validation": 0, "test": 0})
+            self.assertEqual((root / "train.txt").read_text(), "")
+            self.assertFalse((root / "labels" / "train" / "frame.txt").exists())
+
+    def test_extend_preserves_completed_seed_and_reaches_explicit_split_targets(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            base, videos, cache = root / "base", root / "videos", root / "cache"
+            base.mkdir()
+            videos.mkdir()
+            cache.mkdir()
+            records, items, paths = [], {}, []
+            for split_index, split in enumerate(("train", "validation", "test")):
+                video = videos / f"{split}.mp4"
+                writer = cv2.VideoWriter(
+                    str(video), cv2.VideoWriter_fourcc(*"mp4v"), 10, (64, 48),
+                )
+                for frame_index in range(30):
+                    frame = np.full((48, 64, 3), 40 + split_index * 40 + frame_index, np.uint8)
+                    writer.write(frame)
+                writer.release()
+                digest = __import__("hashlib").sha256(video.read_bytes()).hexdigest()
+                identifier = f"{digest[:12]}-seed"
+                image = Path("images") / split / f"{identifier}.jpg"
+                (base / image).parent.mkdir(parents=True, exist_ok=True)
+                cv2.imwrite(str(base / image), np.full((48, 64, 3), 80 + split_index, np.uint8))
+                records.append({
+                    "id": identifier, "split": split, "image": image.as_posix(),
+                    "width": 64, "height": 48, "sourceVideo": str(video),
+                    "sourceVideoSha256": digest, "sourceId": split,
+                    "sourceTitle": split, "sourceUrl": None, "sourceSeconds": 0.,
+                    "selectionQuality": 1., "handCount": 2,
+                })
+                items[identifier] = annotation()
+                features = np.zeros((3, 176), np.float32)
+                features[:, split_index * 3:split_index * 3 + 3] = np.eye(3, dtype=np.float32)
+                np.savez_compressed(
+                    cache / f"{digest}.npz",
+                    ordinals=np.arange(3, dtype=np.int32),
+                    seconds=np.array([.6, 1.2, 1.8]),
+                    widths=np.full(3, 64, np.int32),
+                    heights=np.full(3, 48, np.int32),
+                    features=features,
+                    qualities=np.ones(3, np.float32),
+                    hand_counts=np.full(3, 2, np.int8),
+                )
+                paths.append(video)
+            (base / "manifest.json").write_text(json.dumps({
+                "schemaVersion": 1, "kind": "fretboard-keypoint-annotation-dataset",
+                "keypoints": list(KEYPOINTS), "coordinateSpace": "normalized_full_frame",
+                "nativeResolutionPreserved": True, "records": records,
+            }))
+            (base / "annotations.json").write_text(json.dumps({
+                "schemaVersion": 1, "kind": "fretboard-keypoint-annotations",
+                "keypoints": list(KEYPOINTS), "items": items,
+            }))
+            (base / "preferences.json").write_text(json.dumps({
+                "schemaVersion": 1, "kind": "fretboard-annotation-preferences",
+                "overlayOpacity": 1., "captureArrowKeys": True, "dotRadius": 6.,
+            }))
+            output = root / "dataset2"
+            result = extend_dataset(
+                base, output, paths,
+                split_targets={"train": 3, "validation": 3, "test": 3},
+                cache_directory=cache, maximum_per_video=3,
+            )
+            self.assertEqual(len(result["records"]), 9)
+            self.assertEqual(
+                {split: sum(row["split"] == split for row in result["records"]) for split in ("train", "validation", "test")},
+                {"train": 3, "validation": 3, "test": 3},
+            )
+            copied = json.loads((output / "annotations.json").read_text())
+            self.assertEqual(set(copied["items"]), set(items))
+            self.assertEqual(sum(value["complete"] for value in copied["items"].values()), 3)
+            self.assertFalse((output / "data.yaml").exists())
+            self.assertFalse((output / "labels").exists())
+            self.assertEqual(export_yolo(output), {"train": 1, "validation": 1, "test": 1})
 
 
 if __name__ == "__main__":

@@ -105,6 +105,17 @@ def _source_metadata(pairs_path="data/pairs.json", source_map_path="runs/video-e
                 result.setdefault(identifier, {})["title"] = metadata["title"]
             if isinstance(metadata.get("sourceUrl"), str):
                 result.setdefault(identifier, {})["sourceUrl"] = metadata["sourceUrl"]
+        for info_path in sorted(sources.glob("*/source.info.json")):
+            identifier = info_path.parent.name
+            try:
+                metadata = json.loads(info_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as error:
+                raise ValueError(f"Invalid yt-dlp source metadata: {info_path}: {error}") from error
+            if isinstance(metadata.get("title"), str):
+                result.setdefault(identifier, {}).setdefault("title", metadata["title"])
+            source_url = metadata.get("webpage_url") or metadata.get("original_url")
+            if isinstance(source_url, str):
+                result.setdefault(identifier, {}).setdefault("sourceUrl", source_url)
     return result
 
 
@@ -348,21 +359,26 @@ def select_diverse_candidates(candidates, target, *, minimum_per_video=1, maximu
         raise ValueError("target must be a positive integer.")
     if type(minimum_per_video) is not int or type(maximum_per_video) is not int or not 0 <= minimum_per_video <= maximum_per_video:
         raise ValueError("Invalid per-video selection bounds.")
+    selected = [dict(row) for row in initial]
+    if len(selected) >= target:
+        return selected[:target]
     if not candidates:
         raise ValueError("No usable frame candidates were found.")
     by_video = {}
+    feature_size = None
     for candidate in candidates:
         feature = np.asarray(candidate["feature"], dtype=np.float32)
         if feature.ndim != 1 or not np.isfinite(feature).all():
             raise ValueError("Candidate features must be finite vectors.")
+        if feature_size is None:
+            feature_size = len(feature)
+        elif len(feature) != feature_size:
+            raise ValueError("Candidate feature vectors must have one consistent size.")
         by_video.setdefault(candidate["videoSha256"], []).append(candidate)
     target = min(target, len(candidates))
-    selected = [dict(row) for row in initial]
     counts = {key: 0 for key in by_video}
     for row in selected:
         counts[row["videoSha256"]] = counts.get(row["videoSha256"], 0) + 1
-    if len(selected) >= target:
-        return selected[:target]
     selected_ids = {row["id"] for row in selected}
     for digest, rows in sorted(by_video.items()):
         needed = max(0, minimum_per_video - counts.get(digest, 0))
@@ -376,26 +392,41 @@ def select_diverse_candidates(candidates, target, *, minimum_per_video=1, maximu
             needed -= 1
             if len(selected) == target:
                 return selected
+    matrix = np.stack([
+        np.asarray(candidate["feature"], dtype=np.float32) for candidate in candidates
+    ])
+    if selected:
+        selected_matrix = np.stack([
+            np.asarray(candidate["feature"], dtype=np.float32) for candidate in selected
+        ])
+        minimum_distances = np.min(1 - matrix @ selected_matrix.T, axis=1)
+    else:
+        minimum_distances = np.ones(len(candidates), dtype=np.float32)
     while len(selected) < target:
-        best = None
-        for candidate in candidates:
-            digest = candidate["videoSha256"]
-            if candidate["id"] in selected_ids or counts[digest] >= maximum_per_video:
-                continue
-            distance = min(
-                (1 - float(np.dot(candidate["feature"], chosen["feature"])) for chosen in selected),
-                default=1.,
-            )
-            score = distance + .05 * candidate["quality"]
-            key = score, candidate["quality"], candidate["id"]
-            if best is None or key > best[0]:
-                best = key, candidate
-        if best is None:
+        eligible = [
+            index for index, candidate in enumerate(candidates)
+            if candidate["id"] not in selected_ids
+            and counts[candidate["videoSha256"]] < maximum_per_video
+        ]
+        if not eligible:
             break
-        row = {**best[1], "selectionReason": "visual-diversity"}
+        best_index = max(
+            eligible,
+            key=lambda index: (
+                float(minimum_distances[index]) + .05 * candidates[index]["quality"],
+                candidates[index]["quality"],
+                candidates[index]["id"],
+            ),
+        )
+        candidate = candidates[best_index]
+        row = {**candidate, "selectionReason": "visual-diversity"}
         selected.append(row)
         selected_ids.add(row["id"])
         counts[row["videoSha256"]] += 1
+        minimum_distances = np.minimum(
+            minimum_distances,
+            1 - matrix @ np.asarray(candidate["feature"], dtype=np.float32),
+        )
     return selected
 
 
@@ -766,6 +797,250 @@ def select_dataset(output, videos, *, target_frames=1000, candidates_per_video=2
         raise
 
 
+def _proportional_split(digest, targets):
+    total = sum(targets.values())
+    bucket = int(digest[:8], 16) % total
+    boundary = 0
+    for split in SPLITS:
+        boundary += targets[split]
+        if bucket < boundary:
+            return split
+    raise AssertionError("Split targets did not cover the deterministic bucket.")
+
+
+def _cached_candidates(cache_path, video, digest):
+    try:
+        with np.load(cache_path, allow_pickle=False) as cached:
+            required = {
+                "ordinals", "seconds", "widths", "heights", "features",
+                "qualities", "hand_counts",
+            }
+            if not required <= set(cached.files):
+                raise ValueError("missing arrays")
+            count = len(cached["seconds"])
+            if any(len(cached[name]) != count for name in required - {"features"}):
+                raise ValueError("inconsistent array lengths")
+            if cached["features"].shape[0] != count:
+                raise ValueError("inconsistent feature rows")
+            return [{
+                "id": f"{digest[:12]}-{int(cached['ordinals'][index]):04d}",
+                "video": video,
+                "videoSha256": digest,
+                "seconds": float(cached["seconds"][index]),
+                "width": int(cached["widths"][index]),
+                "height": int(cached["heights"][index]),
+                "feature": np.asarray(cached["features"][index], dtype=np.float32),
+                "quality": float(cached["qualities"][index]),
+                "handCount": None if int(cached["hand_counts"][index]) < 0 else int(cached["hand_counts"][index]),
+            } for index in range(count)]
+    except (OSError, ValueError, KeyError) as error:
+        raise ValueError(f"Invalid selection cache: {cache_path}: {error}") from error
+
+
+def extend_dataset(base_dataset, output, videos, *, split_targets,
+                   cache_directory="data/fretboard-selection-cache",
+                   maximum_per_video=12, jpeg_quality=95):
+    base_dataset = Path(base_dataset).resolve()
+    output = Path(output).resolve()
+    cache_directory = Path(cache_directory).resolve()
+    if output.exists():
+        raise ValueError(f"Refusing to overwrite annotation dataset: {output}")
+    if (
+        not isinstance(split_targets, dict)
+        or set(split_targets) != set(SPLITS)
+        or any(type(split_targets[split]) is not int or split_targets[split] < 1 for split in SPLITS)
+    ):
+        raise ValueError("Split targets require positive train, validation and test frame counts.")
+    if type(maximum_per_video) is not int or maximum_per_video < 1:
+        raise ValueError("maximum_per_video must be a positive integer.")
+    if type(jpeg_quality) is not int or not 80 <= jpeg_quality <= 100:
+        raise ValueError("jpeg_quality must be between 80 and 100.")
+    try:
+        manifest = json.loads((base_dataset / "manifest.json").read_text(encoding="utf-8"))
+        annotations = json.loads((base_dataset / "annotations.json").read_text(encoding="utf-8"))
+        preferences = json.loads((base_dataset / "preferences.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise ValueError(f"Invalid base annotation dataset: {error}") from error
+    if (
+        manifest.get("kind") != "fretboard-keypoint-annotation-dataset"
+        or manifest.get("keypoints") != list(KEYPOINTS)
+        or annotations.get("kind") != "fretboard-keypoint-annotations"
+        or annotations.get("keypoints") != list(KEYPOINTS)
+        or not isinstance(manifest.get("records"), list)
+        or not isinstance(annotations.get("items"), dict)
+    ):
+        raise ValueError("Base dataset differs from the seven-keypoint annotation contract.")
+    records = manifest["records"]
+    identifiers = [record.get("id") for record in records]
+    if len(identifiers) != len(set(identifiers)) or any(not isinstance(value, str) for value in identifiers):
+        raise ValueError("Base dataset frame identifiers must be unique strings.")
+    current_counts = {split: 0 for split in SPLITS}
+    source_splits = {}
+    source_times = {}
+    for record in records:
+        split, digest = record.get("split"), record.get("sourceVideoSha256")
+        if split not in SPLITS or not isinstance(digest, str) or len(digest) != 64:
+            raise ValueError("Base records require valid splits and source hashes.")
+        previous = source_splits.setdefault(digest, split)
+        if previous != split:
+            raise ValueError("One source video crosses base dataset splits.")
+        current_counts[split] += 1
+        source_times.setdefault(digest, []).append(float(record["sourceSeconds"]))
+    if any(current_counts[split] > split_targets[split] for split in SPLITS):
+        raise ValueError("A requested split target is smaller than the base dataset.")
+    if sum(split_targets.values()) <= len(records):
+        raise ValueError("Extended dataset target must exceed the base dataset size.")
+
+    videos_by_digest = {}
+    for index, video in enumerate(videos, 1):
+        digest = _sha256(video)
+        if digest in videos_by_digest and videos_by_digest[digest] != video:
+            raise ValueError("Duplicate source video content was supplied under multiple paths.")
+        videos_by_digest[digest] = video
+        print(f"Dataset extension inventory: {index}/{len(videos)} | {video.name}", flush=True)
+    missing_sources = sorted(set(source_splits) - set(videos_by_digest))
+    if missing_sources:
+        raise ValueError(f"Base source videos are unavailable: {missing_sources[:5]}")
+    for digest in sorted(set(videos_by_digest) - set(source_splits)):
+        source_splits[digest] = _proportional_split(digest, split_targets)
+
+    metadata = _source_metadata()
+    existing_ids = set(identifiers)
+    candidates = {split: [] for split in SPLITS}
+    for digest, video in sorted(videos_by_digest.items()):
+        cache_path = cache_directory / f"{digest}.npz"
+        if not cache_path.is_file():
+            raise ValueError(f"Selection cache is missing for source video: {video}")
+        for candidate in _cached_candidates(cache_path, video, digest):
+            if candidate["id"] in existing_ids:
+                continue
+            if any(abs(candidate["seconds"] - value) < .5 for value in source_times.get(digest, ())):
+                continue
+            candidates[source_splits[digest]].append(candidate)
+
+    initial = {split: [] for split in SPLITS}
+    for index, record in enumerate(records, 1):
+        image = cv2.imread(str(base_dataset / record["image"]))
+        if image is None:
+            raise ValueError(f"Could not read base annotation image: {record['image']}")
+        feature, _, _ = _frame_feature(image)
+        initial[record["split"]].append({
+            "id": record["id"],
+            "videoSha256": record["sourceVideoSha256"],
+            "seconds": float(record["sourceSeconds"]),
+            "feature": feature,
+            "quality": float(record.get("selectionQuality", 1.)),
+            "handCount": record.get("handCount"),
+        })
+        if index % 50 == 0 or index == len(records):
+            print(f"Dataset extension seed features: {index}/{len(records)}", flush=True)
+
+    selected_new = []
+    for split in SPLITS:
+        target = split_targets[split]
+        base_rows = initial[split]
+        desired_negative = round(target * .05)
+        current_negative = sum(row.get("handCount") == 0 for row in base_rows)
+        negative_add = max(0, desired_negative - current_negative)
+        positive_candidates = [
+            row for row in candidates[split]
+            if row["handCount"] is None or row["handCount"] > 0
+        ]
+        selected = select_diverse_candidates(
+            positive_candidates,
+            target - negative_add,
+            minimum_per_video=1,
+            maximum_per_video=maximum_per_video,
+            initial=base_rows,
+        )
+        if len(selected) != target - negative_add:
+            raise ValueError(f"Not enough diverse positive candidates for {split}: {len(selected)}/{target - negative_add}.")
+        if negative_add:
+            selected = select_diverse_candidates(
+                [row for row in candidates[split] if row["handCount"] == 0],
+                target,
+                minimum_per_video=0,
+                maximum_per_video=maximum_per_video,
+                initial=selected,
+            )
+        if len(selected) < target:
+            selected = select_diverse_candidates(
+                positive_candidates,
+                target,
+                minimum_per_video=0,
+                maximum_per_video=maximum_per_video,
+                initial=selected,
+            )
+        if len(selected) != target:
+            raise ValueError(f"Not enough candidates for {split}: {len(selected)}/{target}.")
+        selected_new.extend({**row, "split": split} for row in selected if row["id"] not in existing_ids)
+
+    shutil.copytree(base_dataset, output)
+    try:
+        new_records = []
+        rows_by_video = {}
+        for row in selected_new:
+            rows_by_video.setdefault(row["video"], []).append(row)
+        exported = 0
+        for video_index, (video, rows) in enumerate(sorted(rows_by_video.items(), key=lambda item: str(item[0])), 1):
+            capture = cv2.VideoCapture(str(video))
+            if not capture.isOpened():
+                raise ValueError(f"Could not open video: {video}")
+            try:
+                for row in sorted(rows, key=lambda value: value["seconds"]):
+                    capture.set(cv2.CAP_PROP_POS_MSEC, row["seconds"] * 1000)
+                    ok, frame = capture.read()
+                    if not ok:
+                        raise ValueError(f"Could not decode selected frame: {video} at {row['seconds']:.3f}s.")
+                    relative = Path("images") / row["split"] / f"{row['id']}.jpg"
+                    destination = output / relative
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    if not cv2.imwrite(str(destination), frame, [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality]):
+                        raise OSError(f"Could not save selected frame: {destination}")
+                    source_id = _source_identifier(video)
+                    new_records.append({
+                        "id": row["id"], "split": row["split"], "image": relative.as_posix(),
+                        "width": int(frame.shape[1]), "height": int(frame.shape[0]),
+                        "sourceVideo": str(video), "sourceVideoSha256": row["videoSha256"],
+                        "sourceId": source_id,
+                        "sourceTitle": metadata.get(source_id, {}).get("title", source_id),
+                        "sourceUrl": metadata.get(source_id, {}).get("sourceUrl"),
+                        "sourceSeconds": row["seconds"],
+                        "selectionReason": "dataset2-visual-diversity",
+                        "selectionQuality": row["quality"], "handCount": row["handCount"],
+                    })
+                    exported += 1
+            finally:
+                capture.release()
+            print(
+                f"Dataset extension export: {video_index}/{len(rows_by_video)} videos | "
+                f"{exported}/{len(selected_new)} new frames | {video.name}",
+                flush=True,
+            )
+        manifest["selection"] = {
+            "method": "incremental-global-farthest-cosine-v2",
+            "baseDataset": str(base_dataset),
+            "baseFrames": len(records),
+            "targetFrames": sum(split_targets.values()),
+            "splitTargets": split_targets,
+            "maximumPerVideo": maximum_per_video,
+            "minimumSourceSeparationSeconds": .5,
+            "candidateCache": str(cache_directory),
+        }
+        manifest["records"] = records + sorted(
+            new_records, key=lambda row: (SPLITS.index(row["split"]), row["sourceVideoSha256"], row["sourceSeconds"]),
+        )
+        _publish(output / "manifest.json", manifest)
+        _publish(output / "annotations.json", annotations)
+        _publish(output / "preferences.json", preferences)
+        shutil.rmtree(output / "labels", ignore_errors=True)
+        (output / "data.yaml").unlink(missing_ok=True)
+        return manifest
+    except Exception:
+        shutil.rmtree(output, ignore_errors=True)
+        raise
+
+
 def initialize_dataset(output, videos, *, frames_per_video=5, jpeg_quality=95):
     output = Path(output).resolve()
     if output.exists():
@@ -868,17 +1143,24 @@ def _point(value):
 
 
 def normalize_annotation(value):
-    if not isinstance(value, dict) or set(value) != {"points", "complete", "note"}:
-        raise ValueError("Annotation requires points, complete, and note.")
+    allowed = {"points", "complete", "note", "disabled"}
+    if not isinstance(value, dict) or not {"points", "complete", "note"} <= set(value) or set(value) - allowed:
+        raise ValueError("Annotation requires points, complete, note, and optional disabled state.")
     points = value["points"]
     if not isinstance(points, list) or len(points) != len(KEYPOINTS):
         raise ValueError(f"Annotation requires {len(KEYPOINTS)} ordered keypoints.")
     points = [_point(point) for point in points]
-    if type(value["complete"]) is not bool or not isinstance(value["note"], str):
-        raise ValueError("Annotation complete must be boolean and note must be text.")
+    disabled = value.get("disabled", False)
+    if type(value["complete"]) is not bool or type(disabled) is not bool or not isinstance(value["note"], str):
+        raise ValueError("Annotation complete and disabled must be boolean and note must be text.")
+    if disabled and value["complete"]:
+        raise ValueError("A disabled frame cannot also be complete.")
     if value["complete"]:
         validate_geometry(points)
-    return {"points": points, "complete": value["complete"], "note": value["note"][:1000]}
+    return {
+        "points": points, "complete": value["complete"],
+        "disabled": disabled, "note": value["note"][:1000],
+    }
 
 
 def normalize_preferences(value):
@@ -956,15 +1238,20 @@ def export_yolo(dataset):
     annotations = json.loads((dataset / "annotations.json").read_text(encoding="utf-8"))
     items = annotations["items"]
     counts = {split: 0 for split in SPLITS}
+    shutil.rmtree(dataset / "labels", ignore_errors=True)
+    split_images = {split: [] for split in SPLITS}
     for record in manifest["records"]:
         value = items.get(record["id"])
         if value is None or not value.get("complete"):
             continue
         value = normalize_annotation(value)
+        if value["disabled"]:
+            continue
         points = value["points"]
         visible = [point for point in points if point["visibility"]]
         label = dataset / "labels" / record["split"] / f"{record['id']}.txt"
         label.parent.mkdir(parents=True, exist_ok=True)
+        split_images[record["split"]].append(f"./{record['image']}")
         if not visible:
             label.write_text("", encoding="ascii")
             counts[record["split"]] += 1
@@ -982,11 +1269,15 @@ def export_yolo(dataset):
             ))
         label.write_text(" ".join(fields) + "\n", encoding="ascii")
         counts[record["split"]] += 1
+    for split, images in split_images.items():
+        (dataset / f"{split}.txt").write_text(
+            "".join(f"{image}\n" for image in images), encoding="utf-8",
+        )
     yaml = "\n".join((
         f"path: {dataset.as_posix()}",
-        "train: images/train",
-        "val: images/validation",
-        "test: images/test",
+        "train: train.txt",
+        "val: validation.txt",
+        "test: test.txt",
         "kpt_shape: [7, 3]",
         "flip_idx: [0, 1, 2, 3, 4, 5, 6]",
         "names:",
@@ -1006,7 +1297,7 @@ button,input,textarea{font:inherit} button{border:1px solid #999;border-radius:2
 #counter{font-weight:bold} #songLink{font-weight:bold;color:#0645ad} #saveState{margin-left:auto;font-weight:bold;color:#176b2c}
 #progressWrap{position:absolute;top:52px;left:0;right:0;height:25px;padding:4px 6px;background:#ddd;border-bottom:1px solid #aaa;overflow-x:auto;overflow-y:hidden}
 #progress{height:17px;display:flex;min-width:max-content}.progressFrame{min-width:4px;flex:1 0 4px;height:17px;padding:0;border:0;border-right:1px solid #111;border-radius:0}
-.progressFrame.complete{background:#3fb950}.progressFrame.started{background:#d29922}.progressFrame.untouched{background:#f85149}.progressFrame.current{outline:2px solid white;outline-offset:-2px;position:relative;z-index:1}
+.progressFrame.complete{background:#3fb950}.progressFrame.disabled{background:#6e7681}.progressFrame.started{background:#d29922}.progressFrame.untouched{background:#f85149}.progressFrame.current{outline:2px solid white;outline-offset:-2px;position:relative;z-index:1}
 .progressFrame.predicted{background:#8b5cf6}
 #side{position:absolute;top:77px;bottom:0;left:0;width:320px;padding:12px;background:#fff;border-right:1px solid #aaa;overflow:auto}
 #wrap{position:absolute;top:77px;bottom:0;left:320px;right:0;overflow:hidden;background:#ccc}
@@ -1033,6 +1324,7 @@ h2{font-size:15px;margin:0 0 7px}.help{color:#555;line-height:1.35;margin:0 0 10
  <div class="section"><h2>Landmark dot radius</h2><div class="rangeRow"><input id="dotRadius" type="range" min="2" max="20" step="1" value="6"><output id="dotRadiusValue">6 px</output></div></div>
  <div class="section"><label class="complete"><input id="captureArrows" type="checkbox" checked><span>Always use ← / → for frame navigation<br><small>Focused checkboxes, sliders, buttons, and text fields will not consume these keys.</small></span></label></div>
  <div class="section"><label class="complete"><input id="complete" type="checkbox"><span>Frame fully reviewed<br><small>Points outside the shot may remain unavailable.</small></span></label></div>
+ <div class="section"><label class="complete"><input id="disabled" type="checkbox"><span>Disable this image<br><small>Counts as reviewed but is excluded from every YOLO export.</small></span></label></div>
  <div class="section"><h2>Optional note</h2><p class="help">For human review only. It has no effect on training.</p><textarea id="note" placeholder="Describe ambiguity, capo, occlusion, or why points are unavailable."></textarea></div>
  <div class="section help">Enter: complete and advance<br>← / →: previous / next without completing<br>Q / W / E: available / occluded / unavailable<br>Wheel: zoom<br>Middle/right drag: pan<br>1-7: select landmark</div>
 </aside>
@@ -1043,24 +1335,24 @@ const labels = ["Nut contact — Low E / String 6","Nut contact — High E / Str
 const colors = ["#ff5252","#ffca28","#66bb6a","#26c6da","#7e57c2","#ec407a","#1565c0"];
 let state, index=0, selected=0, mode=2, image=new Image(), scale=1, ox=0, oy=0, panning=false, placing=false, last, cursorX=0, cursorY=0, cursorInside=false, overlayOpacity=1, dotRadius=6, captureArrows=true;
 const $=id=>document.getElementById(id), canvas=$("canvas"), ctx=canvas.getContext("2d");
-function blank(){return {points:names.map(()=>({x:null,y:null,visibility:0})),complete:false,note:""}}
+function blank(){return {points:names.map(()=>({x:null,y:null,visibility:0})),complete:false,disabled:false,note:""}}
 function prediction(){return state.predictions?.items?.[state.manifest.records[index].id]||null}
-function item(){let id=state.manifest.records[index].id;if(!state.annotations.items[id]){let p=prediction();state.annotations.items[id]=p?{points:structuredClone(p.points),complete:false,note:""}:blank()}return state.annotations.items[id]}
+function item(){let id=state.manifest.records[index].id;if(!state.annotations.items[id]){let p=prediction();state.annotations.items[id]=p?{points:structuredClone(p.points),complete:false,disabled:false,note:""}:blank()}let value=state.annotations.items[id];if(typeof value.disabled!="boolean")value.disabled=false;return value}
 async function load(){state=await (await fetch("/api/state")).json();overlayOpacity=state.preferences.overlayOpacity;dotRadius=state.preferences.dotRadius;captureArrows=state.preferences.captureArrowKeys;$("opacity").value=Math.round(overlayOpacity*100);$("opacityValue").value=`${Math.round(overlayOpacity*100)}%`;$("dotRadius").value=dotRadius;$("dotRadiusValue").value=`${dotRadius} px`;$("captureArrows").checked=captureArrows;show(0)}
 function fit(){let w=canvas.clientWidth,h=canvas.clientHeight; canvas.width=w*devicePixelRatio;canvas.height=h*devicePixelRatio;ctx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);scale=Math.min(w/image.width,h/image.height);ox=(w-image.width*scale)/2;oy=(h-image.height*scale)/2;draw()}
 function pointStatus(point){return point.visibility==2?"Available":point.visibility==1?"Occluded":"Unavailable"}
 function pointStatusClass(point){return point.visibility==2?"available":point.visibility==1?"occluded":"unavailable"}
-function annotationState(value,record){if(value?.complete)return "complete";if(value&&(value.note.trim()||value.points.some(point=>point.visibility)))return "started";if(state.predictions?.items?.[record.id])return "predicted";return "untouched"}
+function annotationState(value,record){if(value?.disabled)return "disabled";if(value?.complete)return "complete";if(value&&(value.note.trim()||value.points.some(point=>point.visibility)))return "started";if(state.predictions?.items?.[record.id])return "predicted";return "untouched"}
 function renderProgress(){let host=$("progress");host.innerHTML="";state.manifest.records.forEach((record,i)=>{let value=state.annotations.items[record.id],status=annotationState(value,record),button=document.createElement("button");button.className=`progressFrame ${status}${i==index?" current":""}`;button.title=`Frame ${i+1}: ${status}`;button.setAttribute("aria-label",button.title);button.onclick=()=>show(i);host.appendChild(button)});let current=host.children[index];if(current)current.scrollIntoView({block:"nearest",inline:"center"})}
-function renderButtons(){let host=$("pointButtons");host.innerHTML="";item().points.forEach((point,i)=>{let b=document.createElement("button");b.className=`pointButton ${pointStatusClass(point)}${i==selected?" active":""}`;b.style.setProperty("--color",colors[i]);b.innerHTML=`<strong>${i+1}. ${labels[i]}</strong><small>${pointStatus(point)}</small>`;b.onclick=()=>selectPoint(i);host.appendChild(b)})}
+function renderButtons(){let host=$("pointButtons");host.innerHTML="";item().points.forEach((point,i)=>{let b=document.createElement("button");b.className=`pointButton ${pointStatusClass(point)}${i==selected?" active":""}`;b.style.setProperty("--color",colors[i]);b.innerHTML=`<strong>${i+1}. ${labels[i]}</strong><small>${pointStatus(point)}</small>`;b.disabled=item().disabled;b.onclick=()=>selectPoint(i);host.appendChild(b)})}
 function selectPoint(i){selected=i;setMode(item().points[selected].visibility);renderButtons();draw()}
 function setMode(value){mode=value;$("visible").classList.toggle("active",mode==2);$("occluded").classList.toggle("active",mode==1);$("clear").classList.toggle("active",mode==0)}
-function setSelectedStatus(value){setMode(value);let point=item().points[selected];if(point.x!==null&&point.y!==null){point.visibility=value;renderButtons();draw();save()}else{setStatus(value==2?"Click the image to place this available point":"Click the image to place this occluded point")}}
-function setSelectedUnavailable(){setMode(0);item().points[selected]={x:null,y:null,visibility:0};renderButtons();draw();save()}
+function setSelectedStatus(value){if(item().disabled)return;setMode(value);let point=item().points[selected];if(point.x!==null&&point.y!==null){point.visibility=value;renderButtons();draw();save()}else{setStatus(value==2?"Click the image to place this available point":"Click the image to place this occluded point")}}
+function setSelectedUnavailable(){if(item().disabled)return;setMode(0);item().points[selected]={x:null,y:null,visibility:0};renderButtons();draw();save()}
 function timestamp(seconds){let milliseconds=Math.round((seconds%1)*1000),whole=Math.floor(seconds),s=whole%60,m=Math.floor(whole/60)%60,h=Math.floor(whole/3600);return `${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}.${String(milliseconds).padStart(3,"0")}`}
 function sourceUrl(url,seconds){if(!url)return "";let separator=url.includes("?")?"&":"?";return `${url}${separator}t=${Math.max(0,Math.round(seconds))}s`}
 function renderPrediction(){let p=prediction(),panel=$("predictionPanel");panel.hidden=!p;if(p)$("predictionInfo").textContent=`${p.reason} · confidence ${p.confidence.toFixed(3)} · ${p.review}`}
-function show(i){index=Math.max(0,Math.min(state.manifest.records.length-1,i));let r=state.manifest.records[index];image.onload=()=>{fit();};image.src="/"+r.image;let link=$("songLink");link.textContent=r.sourceTitle||r.sourceId||"Unknown song";if(r.sourceUrl)link.href=sourceUrl(r.sourceUrl,r.sourceSeconds);else link.removeAttribute("href");link.style.pointerEvents=r.sourceUrl?"auto":"none";$("counter").textContent=`· ${timestamp(r.sourceSeconds)} · Frame ${index+1} of ${state.manifest.records.length} · ${r.split} · ${r.width} × ${r.height}`;$("next").style.visibility=index==state.manifest.records.length-1?"hidden":"visible";renderPrediction();$("complete").checked=item().complete;$("note").value=item().note;renderButtons();renderProgress();setMode(item().points[selected].visibility);setStatus("All changes autosave")}
+function show(i){index=Math.max(0,Math.min(state.manifest.records.length-1,i));let r=state.manifest.records[index];image.onload=()=>{fit();};image.src="/"+r.image;let link=$("songLink");link.textContent=r.sourceTitle||r.sourceId||"Unknown song";if(r.sourceUrl)link.href=sourceUrl(r.sourceUrl,r.sourceSeconds);else link.removeAttribute("href");link.style.pointerEvents=r.sourceUrl?"auto":"none";let reviewed=Object.values(state.annotations.items).filter(value=>value.complete||value.disabled).length;$("counter").textContent=`· ${timestamp(r.sourceSeconds)} · Frame ${index+1} of ${state.manifest.records.length} · Reviewed ${reviewed}/${state.manifest.records.length} · ${r.split} · ${r.width} × ${r.height}`;$("next").style.visibility=index==state.manifest.records.length-1?"hidden":"visible";renderPrediction();$("complete").checked=item().complete;$("complete").disabled=item().disabled;$("disabled").checked=item().disabled;$("note").value=item().note;renderButtons();renderProgress();setMode(item().points[selected].visibility);for(let id of ["visible","occluded","clear","acceptPrediction"])$(id).disabled=item().disabled;setStatus("All changes autosave")}
 function draw(){ctx.clearRect(0,0,canvas.clientWidth,canvas.clientHeight);ctx.globalAlpha=1;ctx.drawImage(image,ox,oy,image.width*scale,image.height*scale);let p=item().points,predictionPoints=prediction()?.points;ctx.save();ctx.globalAlpha=overlayOpacity;ctx.lineWidth=2;
  if(predictionPoints){predictionPoints.forEach((x,i)=>{if(!x.visibility)return;let X=ox+x.x*image.width*scale,Y=oy+x.y*image.height*scale;ctx.strokeStyle="#666";ctx.setLineDash([4,3]);ctx.beginPath();ctx.arc(X,Y,dotRadius+3,0,Math.PI*2);ctx.stroke();ctx.setLineDash([])})}
  [[0,2,4],[1,3,5],[0,1],[2,3],[4,5]].forEach(line=>{let q=line.map(i=>p[i]);if(q.every(x=>x.visibility)){ctx.strokeStyle="#00e5ff";ctx.beginPath();q.forEach((x,j)=>{let X=ox+x.x*image.width*scale,Y=oy+x.y*image.height*scale;j?ctx.lineTo(X,Y):ctx.moveTo(X,Y)});ctx.stroke()}});
@@ -1068,14 +1360,15 @@ function draw(){ctx.clearRect(0,0,canvas.clientWidth,canvas.clientHeight);ctx.gl
  if(cursorInside){let left=Math.max(0,ox),right=Math.min(canvas.clientWidth,ox+image.width*scale),top=Math.max(0,oy),bottom=Math.min(canvas.clientHeight,oy+image.height*scale);if(cursorX>=left&&cursorX<=right&&cursorY>=top&&cursorY<=bottom){ctx.save();ctx.lineWidth=1/devicePixelRatio;ctx.strokeStyle="#FFF";ctx.beginPath();ctx.moveTo(left,cursorY);ctx.lineTo(right,cursorY);ctx.moveTo(cursorX,top);ctx.lineTo(cursorX,bottom);ctx.stroke();ctx.restore()}}}
 function setStatus(x,error=false){$("saveState").textContent=x;$("saveState").style.color=error?"#ff7b72":"#7ee787"}
 async function save(){let r=state.manifest.records[index], value=item();value.complete=$("complete").checked;value.note=$("note").value;setStatus("Saving…");let response=await fetch("/api/annotation/"+r.id,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(value)});let data=await response.json();if(!response.ok){$("complete").checked=false;value.complete=false;renderProgress();setStatus(data.error,true);return false}state.annotations.items[r.id]=data;let p=prediction();if(p)p.review=!data.complete?"pending":JSON.stringify(data.points)==JSON.stringify(p.points)?"accepted":"corrected";renderPrediction();renderButtons();renderProgress();setStatus("Saved");return true}
+async function setImageDisabled(disabled){let value=item(),previousDisabled=value.disabled,previousComplete=value.complete;value.disabled=disabled;if(disabled){value.complete=false;$("complete").checked=false}let saved=false;try{saved=await save()}catch(error){setStatus(`Save failed: ${error.message}`,true)}if(saved){show(index);return}value.disabled=previousDisabled;value.complete=previousComplete;$("disabled").checked=previousDisabled;$("complete").checked=previousComplete;$("complete").disabled=previousDisabled;renderButtons();renderProgress()}
 async function savePreferences(){state.preferences.overlayOpacity=overlayOpacity;state.preferences.dotRadius=dotRadius;state.preferences.captureArrowKeys=captureArrows;setStatus("Saving preferences…");let response=await fetch("/api/preferences",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(state.preferences)});let data=await response.json();if(!response.ok){setStatus(data.error,true);return}state.preferences=data;setStatus("Preferences saved")}
-function placeAt(e){if(mode==0){setStatus("Choose Available (Q) or Occluded (W) before placing this point",true);return false}let x=(e.offsetX-ox)/(image.width*scale),y=(e.offsetY-oy)/(image.height*scale);if(x<0||x>1||y<0||y>1)return false;item().points[selected]={x,y,visibility:mode};renderButtons();draw();return true}
+function placeAt(e){if(item().disabled)return false;if(mode==0){setStatus("Choose Available (Q) or Occluded (W) before placing this point",true);return false}let x=(e.offsetX-ox)/(image.width*scale),y=(e.offsetY-oy)/(image.height*scale);if(x<0||x>1||y<0||y>1)return false;item().points[selected]={x,y,visibility:mode};renderButtons();draw();return true}
 canvas.onmousedown=e=>{if(e.button==1||e.button==2){panning=true;last=[e.clientX,e.clientY];return}if(e.button==0){placing=placeAt(e)}};
 canvas.onmousemove=e=>{cursorX=e.offsetX;cursorY=e.offsetY;cursorInside=true;if(panning){ox+=e.clientX-last[0];oy+=e.clientY-last[1];last=[e.clientX,e.clientY]}else if(placing){placeAt(e)}draw()};canvas.onmouseup=e=>{if(e.button==0&&placing){placing=false;save()}panning=false};canvas.onmouseleave=()=>{cursorInside=false;if(placing){placing=false;save()}panning=false;draw()};canvas.onmouseenter=e=>{cursorInside=true;cursorX=e.offsetX;cursorY=e.offsetY;draw()};canvas.oncontextmenu=e=>e.preventDefault();
 canvas.onwheel=e=>{e.preventDefault();let factor=e.deltaY<0?1.15:1/1.15,x=e.offsetX,y=e.offsetY;ox=x-(x-ox)*factor;oy=y-(y-oy)*factor;scale*=factor;draw()};
-$("prev").onclick=()=>show(index-1);$("next").onclick=()=>show(index+1);$("visible").onclick=()=>setSelectedStatus(2);$("occluded").onclick=()=>setSelectedStatus(1);$("clear").onclick=setSelectedUnavailable;$("complete").onchange=save;$("note").onchange=save;$("opacity").oninput=e=>{overlayOpacity=+e.target.value/100;$("opacityValue").value=`${e.target.value}%`;draw()};$("opacity").onchange=savePreferences;$("dotRadius").oninput=e=>{dotRadius=+e.target.value;$("dotRadiusValue").value=`${e.target.value} px`;draw()};$("dotRadius").onchange=savePreferences;$("captureArrows").onchange=e=>{captureArrows=e.target.checked;savePreferences()};
+$("prev").onclick=()=>show(index-1);$("next").onclick=()=>show(index+1);$("visible").onclick=()=>setSelectedStatus(2);$("occluded").onclick=()=>setSelectedStatus(1);$("clear").onclick=setSelectedUnavailable;$("complete").onchange=save;$("disabled").onchange=e=>setImageDisabled(e.target.checked);$("note").onchange=save;$("opacity").oninput=e=>{overlayOpacity=+e.target.value/100;$("opacityValue").value=`${e.target.value}%`;draw()};$("opacity").onchange=savePreferences;$("dotRadius").oninput=e=>{dotRadius=+e.target.value;$("dotRadiusValue").value=`${e.target.value} px`;draw()};$("dotRadius").onchange=savePreferences;$("captureArrows").onchange=e=>{captureArrows=e.target.checked;savePreferences()};
 $("acceptPrediction").onclick=async()=>{$("complete").checked=true;if(await save()&&index<state.manifest.records.length-1)show(index+1)};
-window.onresize=fit;window.onkeydown=async e=>{if((e.key=="ArrowLeft"||e.key=="ArrowRight")&&captureArrows){e.preventDefault();e.stopPropagation();if(document.activeElement)document.activeElement.blur();show(index+(e.key=="ArrowLeft"?-1:1));return}if(["INPUT","TEXTAREA"].includes(e.target.tagName))return;if(e.key=="Enter"){e.preventDefault();$("complete").checked=true;if(await save()&&index<state.manifest.records.length-1)show(index+1)}else if(e.key=="["){e.preventDefault();show(index-1)}else if(e.key=="]"){e.preventDefault();show(index+1)}else if(/[1-7]/.test(e.key))selectPoint(+e.key-1);else if(e.key.toLowerCase()=="q")setSelectedStatus(2);else if(e.key.toLowerCase()=="w")setSelectedStatus(1);else if(e.key.toLowerCase()=="e")setSelectedUnavailable()};load();
+window.onresize=fit;window.onkeydown=async e=>{if((e.key=="ArrowLeft"||e.key=="ArrowRight")&&captureArrows){e.preventDefault();e.stopPropagation();if(document.activeElement)document.activeElement.blur();show(index+(e.key=="ArrowLeft"?-1:1));return}if(["INPUT","TEXTAREA"].includes(e.target.tagName))return;if(e.key=="Enter"){e.preventDefault();if(!item().disabled){$("complete").checked=true;item().complete=true}if(await save()&&index<state.manifest.records.length-1)show(index+1)}else if(e.key=="["){e.preventDefault();show(index-1)}else if(e.key=="]"){e.preventDefault();show(index+1)}else if(/[1-7]/.test(e.key))selectPoint(+e.key-1);else if(e.key.toLowerCase()=="q")setSelectedStatus(2);else if(e.key.toLowerCase()=="w")setSelectedStatus(1);else if(e.key.toLowerCase()=="e")setSelectedUnavailable()};load();
 </script>"""
 
 
@@ -1222,6 +1515,17 @@ def parser():
     selection.add_argument("--negative-fraction", type=float, default=.05)
     selection.add_argument("--one-hand-fraction", type=float, default=.30)
     selection.add_argument("--cache-directory", default="data/fretboard-selection-cache")
+    extension = commands.add_parser("extend")
+    extension.add_argument("--base-dataset", required=True)
+    extension.add_argument("--output", required=True)
+    extension.add_argument("--video", action="append", default=[])
+    extension.add_argument("--video-directory")
+    extension.add_argument("--train-frames", type=int, required=True)
+    extension.add_argument("--validation-frames", type=int, required=True)
+    extension.add_argument("--test-frames", type=int, required=True)
+    extension.add_argument("--maximum-per-video", type=int, default=12)
+    extension.add_argument("--jpeg-quality", type=int, default=95)
+    extension.add_argument("--cache-directory", default="data/fretboard-selection-cache")
     ui = commands.add_parser("serve")
     ui.add_argument("--dataset", required=True)
     ui.add_argument("--port", type=int, default=8765)
@@ -1264,6 +1568,24 @@ def main(argv=None):
             cache_directory=args.cache_directory,
         )
         print(json.dumps({"frames": len(manifest["records"]), "output": str(Path(args.output).resolve())}))
+    elif args.command == "extend":
+        manifest = extend_dataset(
+            args.base_dataset, args.output,
+            _videos(args.video, args.video_directory),
+            split_targets={
+                "train": args.train_frames,
+                "validation": args.validation_frames,
+                "test": args.test_frames,
+            },
+            maximum_per_video=args.maximum_per_video,
+            jpeg_quality=args.jpeg_quality,
+            cache_directory=args.cache_directory,
+        )
+        print(json.dumps({
+            "frames": len(manifest["records"]),
+            "output": str(Path(args.output).resolve()),
+            "splitTargets": manifest["selection"]["splitTargets"],
+        }))
     elif args.command == "serve":
         serve(args.dataset, args.port, open_browser=not args.no_browser)
     elif args.command == "export":
