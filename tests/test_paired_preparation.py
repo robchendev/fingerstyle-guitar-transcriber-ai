@@ -68,7 +68,7 @@ class PairedBatchTests(unittest.TestCase):
     def worker(self, command, **kwargs):
         self.calls.append(command)
         request = read_json(Path(command[command.index("--request") + 1]))
-        self.assertEqual(set(request), {"schemaVersion", "kind", "id", "video", "audio", "outputDirectory", "pluckingScreenSide", "clips", "reuse", "handModel", "poseModel", "fretboardModel", "reviewMode"})
+        self.assertEqual(set(request), {"schemaVersion", "kind", "id", "video", "audio", "outputDirectory", "pluckingScreenSide", "clips", "reuse", "handModel", "poseModel", "fretboardModel", "fretboardDevice", "reviewMode"})
         path = Path(command[command.index("--output") + 1])
         result = {
             "schemaVersion": 1, "kind": "paired-video-preparation-result", "id": request["id"], "status": "ready",
@@ -228,12 +228,21 @@ class PairedBatchTests(unittest.TestCase):
     def test_roles_are_explicit_and_pose_is_not_enabled_by_default(self):
         batch = load_batch(self.manifest, root=self.root)
         self.assertIsNone(batch["poseModel"])
+        self.assertEqual(batch["fretboardDevice"], "cpu")
         self.assertNotIn("geometryMode", batch)
         del self.document["videoPython"]
         self.save()
         with patch.dict("os.environ", {"VIDEO_PYTHON": sys.executable}):
             self.assertEqual(load_batch(self.manifest, root=self.root)["videoPython"], str(Path(sys.executable).absolute()))
         self.document["videoPython"] = sys.executable
+        self.document["fretboardDevice"] = "0"
+        self.save()
+        self.assertEqual(load_batch(self.manifest, root=self.root)["fretboardDevice"], "0")
+        self.document["fretboardDevice"] = ""
+        self.save()
+        with self.assertRaisesRegex(ValueError, "fretboardDevice"):
+            load_batch(self.manifest, root=self.root)
+        self.document.pop("fretboardDevice")
         for side in (None, "geometry", "unknown"):
             self.document["records"][0]["pluckingScreenSide"] = side
             self.save()

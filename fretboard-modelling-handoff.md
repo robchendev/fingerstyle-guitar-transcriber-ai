@@ -196,8 +196,11 @@ Do not accept the detector from confidence scores alone.
 Add these top-level batch manifest fields:
 
 ```json
-{"videoPython":"scripts\\video-evidence\\.venv\\Scripts\\python.exe","fretboardModel":"runs\\fretboard-detector\\weights\\best.pt","workers":16}
+{"videoPython":"scripts\\video-evidence\\.venv\\Scripts\\python.exe","fretboardModel":"runs\\fretboard-detector\\weights\\best.pt","fretboardDevice":"cpu","workers":16}
 ```
+
+For macOS-to-Colab packaging, GPU device `0`, one-worker corpus preparation and
+resumable joint training, follow `docs/COLAB_TRAINING.md`.
 
 Install detector dependencies into the video environment:
 

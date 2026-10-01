@@ -2,6 +2,9 @@
 
 Complete the [setup instructions](../README.md#setup), activate the root Python environment with `.\.venv\Scripts\Activate.ps1`, and run these commands from the repository root.
 
+For GPU corpus preparation and resumable joint training from a Mac through
+Google Colab, follow the [Colab workflow](COLAB_TRAINING.md).
+
 Use matching `.gp` scores and already-trimmed local performance videos. Audio is extracted automatically. If you supply an `audio` file instead, it must match the performance. Videos with multiple audio tracks or timing errors require a separate audio file and alignment review.
 
 **Important: Every video must start exactly on the first beat of the song at timestamp 0.** Trim any lead-in, silence or count-in before preparing the dataset. Keep the audio and video synchronized, including any separately supplied audio.

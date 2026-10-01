@@ -33,7 +33,7 @@ from paired_inputs import (FEATURE_LAYOUT, INPUT_REPRESENTATION, SCHEMA_VERSION 
                            STRUCTURED_DIM, VIEW_ORDER, FRETBOARD_FEATURE_LAYOUT,
                            FRETBOARD_INPUT_REPRESENTATION, FRETBOARD_SCHEMA_VERSION,
                            FRETBOARD_STRUCTURED_DIM, prepare_paired_inputs, prepare_paired_inputs_v5)
-from fretboard_tracking import track_fretboard
+from fretboard_tracking import FretboardDetectorConfig, track_fretboard
 from shot_inspector import (_write_thumbnail, frame_timeline_sha256, inspect_shots,
                             prepare_automatic_shots, validate_frame_timeline)
 
@@ -118,7 +118,8 @@ def _request(path):
     path = _path(path, file=True)
     document = _json(path)
     allowed = {"schemaVersion", "kind", "id", "video", "audio", "outputDirectory",
-               "pluckingScreenSide", "clips", "reuse", "handModel", "poseModel", "fretboardModel", "reviewMode"}
+               "pluckingScreenSide", "clips", "reuse", "handModel", "poseModel",
+               "fretboardModel", "fretboardDevice", "reviewMode"}
     if set(document) - allowed:
         raise EvidenceError(f"Unknown video request fields: {sorted(set(document) - allowed)}")
     if type(document.get("schemaVersion")) is not int or document["schemaVersion"] != 1 or document.get("kind") != "paired-video-preparation-request":
@@ -155,6 +156,9 @@ def _request(path):
     result.setdefault("handModel", str(PRIVATE_OUTPUT_ROOT / "models" / "hand_landmarker.task"))
     result.setdefault("poseModel", None)
     result.setdefault("fretboardModel", None)
+    result.setdefault("fretboardDevice", "cpu")
+    if not isinstance(result["fretboardDevice"], str) or not result["fretboardDevice"].strip():
+        raise EvidenceError("fretboardDevice must be a nonempty Ultralytics device string.")
     for name in ("handModel", "poseModel", "fretboardModel"):
         if result[name] is not None:
             result[name] = str(_path(result[name]))
@@ -884,7 +888,10 @@ def _run(worker):
     if r["fretboardModel"]:
         fretboard = worker.stage(
             "fretboard",
-            lambda d: track_fretboard(r["video"], shots, r["fretboardModel"], d)[0],
+            lambda d: track_fretboard(
+                r["video"], shots, r["fretboardModel"], d,
+                detector_config=FretboardDetectorConfig(device=r["fretboardDevice"]),
+            )[0],
             dependencies=("shots",), reuse=reuse.get("fretboard"),
         )
         _validate_report("fretboard", fretboard, r, worker.sources, p)

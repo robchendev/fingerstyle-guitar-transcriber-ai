@@ -161,7 +161,7 @@ class BatchCanonicalTests(unittest.TestCase):
             self.assertEqual(receipt["stream"]["firstDecodedPts"], 1250)
             self.assertEqual(receipt["stream"]["timeBase"], [1, 1000])
             self.assertIsNone(request["poseModel"])
-            self.assertEqual(set(request), {"schemaVersion", "kind", "id", "video", "audio", "outputDirectory", "pluckingScreenSide", "reuse", "handModel", "poseModel", "fretboardModel", "reviewMode"})
+            self.assertEqual(set(request), {"schemaVersion", "kind", "id", "video", "audio", "outputDirectory", "pluckingScreenSide", "reuse", "handModel", "poseModel", "fretboardModel", "fretboardDevice", "reviewMode"})
             bundle = bundles / request["id"] / "inputs.json"
             if not bundle.exists():
                 bundle, report, arrays = schema5_bundle_fixture(bundles, Path(request["audio"]), request["id"], pts=range(1650, 17250, 40))

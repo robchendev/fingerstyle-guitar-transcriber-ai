@@ -88,6 +88,10 @@ The Eddie corpus has a dedicated
 replacing convenience-normalized GP settings with the physical tuning and capo
 filmed in each training video before rebuilding the release.
 
+To transfer a reviewed private corpus and detector checkpoint from macOS for
+GPU preparation and joint training, use the
+[Google Colab workflow](docs/COLAB_TRAINING.md).
+
 ## Limits
 
 Review and edit the generated notes, fingerings, rhythms and techniques. Hand tracking measures posture and movement, not exact string or fret contact.

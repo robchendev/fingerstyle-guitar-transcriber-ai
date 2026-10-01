@@ -37,7 +37,7 @@ def load_batch(path, *, root=ROOT):
     path = regular_path(path)
     raw = read_json(path)
     required = {"schemaVersion", "kind", "records"}
-    optional = {"workspace", "releaseManifest", "releaseVersion", "acceptConventions", "ffmpegDirectory", "videoPython", "handModel", "poseModel", "fretboardModel", "reviewMode", "reviewBudget", "workers"}
+    optional = {"workspace", "releaseManifest", "releaseVersion", "acceptConventions", "ffmpegDirectory", "videoPython", "handModel", "poseModel", "fretboardModel", "fretboardDevice", "reviewMode", "reviewBudget", "workers"}
     if isinstance(raw, dict) and "imageSize" in raw:
         raise ValueError("RGB crop inputs are no longer supported. Remove imageSize and prepare new structure-only bundles.")
     if not isinstance(raw, dict) or not required <= raw.keys() or raw.keys() - required - optional or type(raw["schemaVersion"]) is not int or raw["schemaVersion"] != 1 or raw["kind"] != MANIFEST_KIND:
@@ -70,6 +70,9 @@ def load_batch(path, *, root=ROOT):
     result["poseModel"] = str(_path(pose, root, "pose model")) if pose is not None else None
     fretboard = raw.get("fretboardModel")
     result["fretboardModel"] = str(_path(fretboard, root, "fretboard model")) if fretboard is not None else None
+    result["fretboardDevice"] = raw.get("fretboardDevice", "cpu")
+    if not isinstance(result["fretboardDevice"], str) or not result["fretboardDevice"].strip():
+        raise ValueError("fretboardDevice must be a nonempty Ultralytics device string.")
     result["ffmpegDirectory"] = str(_path(raw["ffmpegDirectory"], root, "FFmpeg directory")) if raw.get("ffmpegDirectory") else None
     if not isinstance(raw["records"], list) or not raw["records"]:
         raise ValueError("Batch records must be a nonempty list.")
@@ -235,7 +238,7 @@ def _request(batch, source, canonical, directory):
         "reviewMode": batch["reviewMode"],
         "pluckingScreenSide": source["pluckingScreenSide"], "reuse": source["reuse"],
         "handModel": batch["handModel"], "poseModel": batch["poseModel"],
-        "fretboardModel": batch["fretboardModel"],
+        "fretboardModel": batch["fretboardModel"], "fretboardDevice": batch["fretboardDevice"],
     }
     if "clips" in source:
         result["clips"] = source["clips"]

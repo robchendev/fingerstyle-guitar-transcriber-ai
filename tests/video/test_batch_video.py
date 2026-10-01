@@ -169,10 +169,14 @@ class BatchVideoTests(unittest.TestCase):
     def test_fretboard_model_adds_resumable_stage_and_schema_five_bundle(self):
         fretboard_model = self.root / "fretboard.pt"
         fretboard_model.write_bytes(b"synthetic six-point detector")
-        self.config.update(reviewMode="automatic", fretboardModel=str(fretboard_model))
+        self.config.update(
+            reviewMode="automatic", fretboardModel=str(fretboard_model),
+            fretboardDevice="0",
+        )
         self.write_request()
 
-        def track(_video, shots_path, model_path, output):
+        def track(_video, shots_path, model_path, output, *, detector_config):
+            self.assertEqual(detector_config.device, "0")
             shots = self.read(shots_path)
             pts = np.asarray(shots["framePts"], np.int64)
             shot_ids = np.zeros(len(pts), np.int32)
